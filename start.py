@@ -1,7 +1,25 @@
+# ==========================================
+# АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
+# ==========================================
+import subprocess
+import sys
+
+def install_dependencies():
+    dependencies = ["aiohttp", "flask", "python-telegram-bot", "requests", "telethon"]
+    for package in dependencies:
+        try:
+            __import__(package.replace("-", "_"))
+            print(f"✅ {package} уже установлен")
+        except ImportError:
+            print(f"📦 Устанавливаю {package}...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
+            print(f"✅ {package} установлен")
+
+install_dependencies()
+print("✅ Все зависимости проверены!")
 # =====================================================================
 # ЧАСТЬ 1: ИМПОРТЫ + КОНФИГУРАЦИЯ
 # =====================================================================
-
 import asyncio
 import sqlite3
 import re
