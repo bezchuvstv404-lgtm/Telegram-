@@ -1480,7 +1480,7 @@ logger.info("✅ ЧАСТЬ 7 ЗАГРУЖЕНА: ДОБАВЛЕНИЕ НОМЕ�
 logger.info("=" * 60)
 
 # =====================================================================
-# ЧАСТЬ 8: ОПЛАТА + ПОЛУЧЕНИЕ КОДА + FLASK
+# ЧАСТЬ 8: ОПЛАТА + ПОЛУЧЕНИЕ КОДА + FLASK (ДО main())
 # =====================================================================
 
 from flask import Flask, request
@@ -1502,7 +1502,6 @@ async def pay_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not product:
             await query.edit_message_text("❌ Не найден")
             return
-
         pid, phone, price_rub, price_stars, age, session = product[:6]
         await query.message.reply_invoice(
             title=f"Номер {phone[:4]}****{phone[-4:]}",
@@ -1517,7 +1516,6 @@ async def pay_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Ошибка оплаты звёздами: {e}")
         await query.edit_message_text(f"❌ Ошибка: {e}")
 
-
 # ==========================================
 # ПРЕДПРОВЕРКА ОПЛАТЫ
 # ==========================================
@@ -1525,7 +1523,6 @@ async def pay_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Предварительная проверка оплаты"""
     await update.pre_checkout_query.answer(ok=True)
-
 
 # ==========================================
 # УСПЕШНАЯ ОПЛАТА ЗВЁЗДАМИ
@@ -1563,7 +1560,6 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
         ])
     )
-
 
 # ==========================================
 # ОПЛАТА РУБЛЯМИ
@@ -1627,7 +1623,6 @@ async def pay_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=keyboard
     )
 
-
 # ==========================================
 # ПРОВЕРКА ОПЛАТЫ РУБЛЯМИ (ЗАГЛУШКА)
 # ==========================================
@@ -1673,7 +1668,6 @@ async def check_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
         ])
     )
-
 
 # ==========================================
 # АВТОМАТИЧЕСКАЯ ВЫДАЧА ТОВАРА (ДЛЯ ВЕБХУКА)
@@ -1726,6 +1720,32 @@ async def auto_deliver_product(user_id, product_id):
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
 
+# ==========================================
+# ГЕНЕРАЦИЯ СООБЩЕНИЯ С ТОВАРОМ
+# ==========================================
+
+def generate_product_message(phone, age, price_rub, price_stars):
+    """Генерирует сообщение с полным номером и предупреждениями"""
+    country_code = get_country_by_phone(phone)
+    country = get_country_by_code(country_code) if country_code else None
+    flag = country['flag'] if country else "🌍"
+    name = country['name'] if country else "Неизвестно"
+    code = country['phone_code'] if country else ""
+    
+    return (
+        f"✅ *ОПЛАЧЕНО!*\n\n"
+        f"🌍 *Страна:* {flag} {name} ({code})\n"
+        f"📱 *ВАШ НОМЕР:* `{phone}`\n"
+        f"📅 *Возраст:* {age} дней\n"
+        f"💰 {price_rub} ₽ / {price_stars}⭐\n\n"
+        f"---\n"
+        f"⚠️ *ПОСЛЕ ВХОДА В АККАУНТ ОБЯЗАТЕЛЬНО:*\n"
+        f"1️⃣ Смените номер телефона на свой\n"
+        f"2️⃣ Поставьте двухфакторную аутентификацию (2FA)\n"
+        f"3️⃣ Установите облачный пароль\n"
+        f"4️⃣ Привяжите почту для восстановления\n\n"
+        f"🔑 Нажмите кнопку, чтобы получить код для входа:"
+    )
 
 # ==========================================
 # ПОЛУЧЕНИЕ КОДА
@@ -1802,7 +1822,6 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-
 # ==========================================
 # КОД ПОДОШЁЛ
 # ==========================================
@@ -1843,6 +1862,84 @@ async def code_ok_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=keyboard
     )
 
+# ==========================================
+# ОТПРАВКА УВЕДОМЛЕНИЙ В ТЕЛЕГРАМ
+# ==========================================
+
+def send_notification_to_telegram(data):
+    """Отправляет уведомление от ЮMoney в Telegram (для реальных и тестовых)"""
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        
+        # === ПРОВЕРЯЕМ, ТЕСТОВОЕ ЛИ ЭТО УВЕДОМЛЕНИЕ ===
+        is_test = data.get('test_notification') == 'true'
+        
+        # === ПОЛУЧАЕМ ДАННЫЕ ===
+        notification_type = data.get('notification_type', 'Неизвестно')
+        amount = data.get('amount', '0')
+        sender = data.get('sender', 'Неизвестно')
+        label = data.get('label', 'Отсутствует')
+        operation_id = data.get('operation_id', 'Неизвестно')
+        datetime_str = data.get('datetime', 'Неизвестно')
+        
+        # === ОПРЕДЕЛЯЕМ ЭМОДЗИ И ТИП ===
+        if is_test:
+            emoji = "🧪"
+            type_text = "ТЕСТОВОЕ УВЕДОМЛЕНИЕ"
+        else:
+            emoji = "💳"
+            type_text = "НОВАЯ ОПЛАТА"
+        
+        # === ОПРЕДЕЛЯЕМ ПОДТИП ПЛАТЕЖА ===
+        if notification_type == 'card-incoming':
+            sub_type = "Платёж по карте"
+        elif notification_type == 'p2p-incoming':
+            sub_type = "Перевод между кошельками"
+        else:
+            sub_type = notification_type
+        
+        # === ФОРМИРУЕМ СООБЩЕНИЕ ===
+        if is_test:
+            message = (
+                f"{emoji} *{type_text}*\n\n"
+                f"📌 Тип: {sub_type}\n"
+                f"💰 Сумма: {amount} ₽\n"
+                f"🏦 Отправитель: `{sender}`\n"
+                f"🏷️ Метка: `{label}`\n"
+                f"🔢 ID: `{operation_id}`\n"
+                f"📅 Дата: {datetime_str}\n\n"
+                f"⚠️ Это тестовое уведомление"
+            )
+        else:
+            message = (
+                f"{emoji} *{type_text}*\n\n"
+                f"📌 Тип: {sub_type}\n"
+                f"💰 Сумма: {amount} ₽\n"
+                f"🏦 Отправитель: `{sender}`\n"
+                f"🏷️ Метка: `{label}`\n"
+                f"🔢 ID: `{operation_id}`\n"
+                f"📅 Дата: {datetime_str}\n\n"
+                f"✅ Статус: ОПЛАЧЕНО"
+            )
+        
+        # === ОТПРАВЛЯЕМ АДМИНУ ===
+        response = requests.post(
+            url,
+            json={
+                "chat_id": ADMIN_CHAT_ID,
+                "text": message,
+                "parse_mode": "Markdown"
+            },
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Уведомление отправлено в Telegram")
+        else:
+            logger.error(f"❌ Ошибка отправки: {response.status_code}")
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки уведомления: {e}")
 
 # ==========================================
 # FLASK-СЕРВЕР ДЛЯ ВЕБХУКА
@@ -1859,29 +1956,31 @@ def yoomoney_webhook():
     data = request.form
     logger.info(f"📨 Получен вебхук: {data}")
     
-    # Обработка пустого тестового уведомления
-    if not data:
-        logger.info("🧪 Получено ТЕСТОВОЕ уведомление (пустое)")
-        return "OK", 200
+    # === ОТПРАВЛЯЕМ ВСЕ УВЕДОМЛЕНИЯ В БОТА ===
+    send_notification_to_telegram(data)
     
-    # Проверка на тестовое уведомление
+    # === ОБРАБОТКА ТЕСТОВОГО УВЕДОМЛЕНИЯ ===
     if data.get('test_notification') == 'true':
-        logger.info("🧪 Получено ТЕСТОВОЕ уведомление")
+        logger.info("🧪 Тестовое уведомление — пропускаем")
         return "OK", 200
     
-    # Обработка реального платежа
-    if data.get('notification_type') == 'card-incoming':
-        label = data.get('label')
-        if label and label.startswith('rub_'):
-            parts = label.split('_')
-            if len(parts) >= 3:
-                product_id = int(parts[1])
-                user_id = int(parts[2])
-                logger.info(f"💳 РЕАЛЬНЫЙ платёж: user_id={user_id}")
-                asyncio.run_coroutine_threadsafe(
-                    auto_deliver_product(user_id, product_id),
-                    asyncio.get_event_loop()
-                )
+    # === ПРОВЕРЯЕМ, ЧТО ЭТО РЕАЛЬНЫЙ ПЛАТЁЖ ===
+    if data.get('notification_type') != 'card-incoming':
+        logger.info(f"⏭️ Не card-incoming — пропускаем")
+        return "OK", 200
+    
+    # === ОБРАБОТКА РЕАЛЬНОГО ПЛАТЕЖА ===
+    label = data.get('label')
+    if label and label.startswith('rub_'):
+        parts = label.split('_')
+        if len(parts) >= 3:
+            product_id = int(parts[1])
+            user_id = int(parts[2])
+            logger.info(f"💳 РЕАЛЬНЫЙ платёж: user_id={user_id}")
+            asyncio.run_coroutine_threadsafe(
+                auto_deliver_product(user_id, product_id),
+                asyncio.get_event_loop()
+            )
     
     return "OK", 200
 
@@ -1891,12 +1990,17 @@ def webhook_test():
     """Проверка работы вебхука"""
     return "✅ Webhook работает!", 200
 
+# ==========================================
+# ОБРАБОТЧИК ОШИБОК
+# ==========================================
 
-logger.info("=" * 60)
-logger.info("✅ ЧАСТЬ 8 ЗАГРУЖЕНА: ОПЛАТА + ПОЛУЧЕНИЕ КОДА + FLASK")
-logger.info("=" * 60)
-
-
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"❌ Ошибка: {context.error}")
+    if update and update.effective_message:
+        try:
+            await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуйте позже.")
+        except:
+            pass
 # =====================================================================
 # ЧАСТЬ 9: ЗАПУСК БОТА
 # =====================================================================
