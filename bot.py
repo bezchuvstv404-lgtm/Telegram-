@@ -1478,6 +1478,7 @@ async def clear_purchases_yes(update: Update, context: ContextTypes.DEFAULT_TYPE
 logger.info("=" * 60)
 logger.info("✅ ЧАСТЬ 7 ЗАГРУЖЕНА: ДОБАВЛЕНИЕ НОМЕРА + МАГАЗИН + МОИ ПОКУПКИ")
 logger.info("=" * 60)
+
 # =====================================================================
 # ЧАСТЬ 8: ОПЛАТА + ПОЛУЧЕНИЕ КОДА + FLASK
 # =====================================================================
@@ -1491,6 +1492,7 @@ flask_app = Flask(__name__)
 # ==========================================
 
 async def pay_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Оплата звёздами"""
     query = update.callback_query
     await query.answer()
     try:
@@ -1500,6 +1502,7 @@ async def pay_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not product:
             await query.edit_message_text("❌ Не найден")
             return
+
         pid, phone, price_rub, price_stars, age, session = product[:6]
         await query.message.reply_invoice(
             title=f"Номер {phone[:4]}****{phone[-4:]}",
@@ -1514,31 +1517,44 @@ async def pay_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Ошибка оплаты звёздами: {e}")
         await query.edit_message_text(f"❌ Ошибка: {e}")
 
+
 # ==========================================
 # ПРЕДПРОВЕРКА ОПЛАТЫ
 # ==========================================
 
 async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Предварительная проверка оплаты"""
     await update.pre_checkout_query.answer(ok=True)
+
 
 # ==========================================
 # УСПЕШНАЯ ОПЛАТА ЗВЁЗДАМИ
 # ==========================================
 
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Успешная оплата звёздами"""
     payload = update.message.successful_payment.invoice_payload
     parts = payload.split("_")
     product_id = int(parts[1])
     user_id = update.effective_user.id
+
     product = get_phone_product(product_id)
     if not product:
         await update.message.reply_text("❌ Номер не найден")
         return
+
     pid, phone, price_rub, price_stars, age, session = product[:6]
     delete_phone_product(product_id)
+
     country_code = get_country_by_phone(phone)
     add_purchase(user_id, phone, price_rub, price_stars, age, session, country_code)
-    awaiting_phone_confirmation[user_id] = {"phone": phone, "product_id": product_id, "session": session}
+
+    awaiting_phone_confirmation[user_id] = {
+        "phone": phone,
+        "product_id": product_id,
+        "session": session
+    }
+
     await update.message.reply_text(
         generate_product_message(phone, age, price_rub, price_stars),
         parse_mode="Markdown",
@@ -1548,94 +1564,154 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ])
     )
 
+
 # ==========================================
 # ОПЛАТА РУБЛЯМИ
 # ==========================================
 
 async def pay_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Оплата рублями — ссылка встроена в кнопку, автоматическая выдача"""
     query = update.callback_query
     await query.answer()
-    try:
-        user_id = query.from_user.id
-        product_id = int(query.data.split("_")[2])
-        product = get_phone_product(product_id)
-        if not product:
-            await query.edit_message_text("❌ Не найден")
-            return
-        pid, phone, price_rub, price_stars, age, session = product[:6]
-        label = f"rub_{product_id}_{user_id}_{int(datetime.now().timestamp())}"
-        pending_rub[user_id] = {"product_id": product_id, "phone": phone, "label": label}
-        payment_url = f"https://yoomoney.ru/quickpay/confirm.xml?receiver={YOOMONEY_WALLET}&quickpay-form=small&sum={price_rub}&label={label}"
-        await query.edit_message_text(
-            f"💳 *ОПЛАТА РУБЛЯМИ*\n\nСумма: {price_rub} ₽\n\n🔗 [Оплатить]({payment_url})\n\n✅ После оплаты нажмите «ПРОВЕРИТЬ»",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [btn("🔄 ПРОВЕРИТЬ ОПЛАТУ", f"check_rub_{product_id}")],
-                [btn("🔙 НАЗАД", "shop")]
-            ])
-        )
-    except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
-        await query.edit_message_text(f"❌ Ошибка: {e}")
+    
+    product_id = int(query.data.split("_")[2])
+    product = get_phone_product(product_id)
+    
+    if not product:
+        await query.edit_message_text("❌ Номер больше не доступен!")
+        return
+    
+    product_id, phone, price_rub, price_stars, age, session = product
+    user_id = query.from_user.id
+    
+    # Определяем страну
+    country_code = get_country_by_phone(phone)
+    country = get_country_by_code(country_code) if country_code else None
+    country_flag = country['flag'] if country else "🌍"
+    country_name = country['name'] if country else "Неизвестно"
+    phone_code = country['phone_code'] if country else ""
+    
+    # Скрытый номер
+    hidden_phone = f"{phone[:4]}****{phone[-4:]}" if len(phone) > 6 else phone
+    
+    # Уникальная метка для платежа
+    label = f"rub_{product_id}_{user_id}_{int(time.time())}"
+    
+    # Сохраняем в ожидании
+    pending_rub[user_id] = {
+        'product_id': product_id,
+        'phone': phone,
+        'label': label,
+        'message_id': query.message.message_id,
+        'chat_id': query.message.chat_id
+    }
+    
+    # Ссылка на оплату (ВСТРОЕНА В КНОПКУ)
+    payment_url = f"https://yoomoney.ru/quickpay/confirm.xml?receiver={YOOMONEY_WALLET}&quickpay-form=small&sum={price_rub}&label={label}"
+    
+    # КНОПКА С ВСТРОЕННОЙ ССЫЛКОЙ (без кнопки "ПРОВЕРИТЬ")
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💳 ОПЛАТИТЬ {price_rub} ₽", url=payment_url)],
+        [btn("🔙 НАЗАД", "shop")]
+    ])
+    
+    await query.edit_message_text(
+        f"💳 *ОПЛАТА РУБЛЯМИ*\n\n"
+        f"🌍 *Страна:* {country_flag} {country_name} ({phone_code})\n"
+        f"📱 *Номер:* `{hidden_phone}`\n"
+        f"📅 *Возраст:* {age} дней\n"
+        f"💰 *Сумма:* {price_rub} ₽\n\n"
+        f"🔗 Нажмите на кнопку ниже для оплаты\n"
+        f"✅ После оплаты товар выдастся АВТОМАТИЧЕСКИ",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+
+
+# ==========================================
+# ПРОВЕРКА ОПЛАТЫ РУБЛЯМИ (ЗАГЛУШКА)
+# ==========================================
 
 async def check_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка оплаты рублями (заглушка)"""
     query = update.callback_query
     await query.answer()
-    product_id = int(query.data.split("_")[2])
+    
     user_id = query.from_user.id
-    pending = pending_rub.get(user_id)
-    if not pending or pending["product_id"] != product_id:
-        await query.edit_message_text("❌ Заказ не найден.", reply_markup=back("shop"))
-        return
-    phone = pending["phone"]
-    label = pending["label"]
-    is_paid = await check_yoomoney_payment_async(label)
-    if not is_paid:
-        await query.edit_message_text(
-            "⏳ Оплата не обнаружена.",
-            reply_markup=InlineKeyboardMarkup([
-                [btn("🔄 ПРОВЕРИТЬ СНОВА", f"check_rub_{product_id}")],
-                [btn("🔙 НАЗАД", "shop")]
-            ])
-        )
-        return
-    product = get_phone_product(product_id)
-    if product:
-        pid, phone, price_rub, price_stars, age, session = product[:6]
-        delete_phone_product(product_id)
-        country_code = get_country_by_phone(phone)
-        add_purchase(user_id, phone, price_rub, price_stars, age, session, country_code)
-        awaiting_phone_confirmation[user_id] = {"phone": phone, "product_id": product_id, "session": session}
-        await query.edit_message_text(
-            generate_product_message(phone, age, price_rub, price_stars),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [btn("🔑 ПОЛУЧИТЬ КОД", "get_code")],
-                [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
-            ])
-        )
-        pending_rub.pop(user_id, None)
-    else:
-        await query.edit_message_text("❌ Товар не найден!", reply_markup=back("shop"))
-
-# ==========================================
-# АВТОМАТИЧЕСКАЯ ВЫДАЧА (ВЕБХУК)
-# ==========================================
-
-async def auto_deliver_product(user_id, product_id):
+    
     if user_id not in pending_rub:
+        await query.edit_message_text("❌ Нет ожидающих платежей!")
         return
+    
     pending = pending_rub[user_id]
+    product_id = pending['product_id']
+    
     product = get_phone_product(product_id)
     if not product:
-        del pending_rub[user_id]
+        await query.edit_message_text("❌ Товар не найден!")
         return
-    pid, phone, price_rub, price_stars, age, session = product[:6]
+    
+    product_id, phone, price_rub, price_stars, age, session = product
+    
     delete_phone_product(product_id)
     country_code = get_country_by_phone(phone)
     add_purchase(user_id, phone, price_rub, price_stars, age, session, country_code)
-    awaiting_phone_confirmation[user_id] = {"phone": phone, "product_id": product_id, "session": session}
+    
+    awaiting_phone_confirmation[user_id] = {
+        'phone': phone,
+        'product_id': product_id,
+        'session': session
+    }
+    
     del pending_rub[user_id]
+    
+    await query.edit_message_text(
+        generate_product_message(phone, age, price_rub, price_stars),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [btn("🔑 ПОЛУЧИТЬ КОД", "get_code")],
+            [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
+        ])
+    )
+
+
+# ==========================================
+# АВТОМАТИЧЕСКАЯ ВЫДАЧА ТОВАРА (ДЛЯ ВЕБХУКА)
+# ==========================================
+
+async def auto_deliver_product(user_id, product_id):
+    """АВТОМАТИЧЕСКАЯ ВЫДАЧА ТОВАРА ПОСЛЕ ОПЛАТЫ РУБЛЯМИ"""
+    logger.info(f"🎁 АВТОМАТИЧЕСКАЯ ВЫДАЧА ТОВАРА ДЛЯ {user_id}")
+
+    if user_id not in pending_rub:
+        logger.warning(f"⚠️ Нет ожидающего платежа для {user_id}")
+        return
+
+    pending = pending_rub[user_id]
+    product_id = pending['product_id']
+    phone = pending['phone']
+
+    product = get_phone_product(product_id)
+    if not product:
+        logger.error(f"❌ Товар {product_id} не найден")
+        del pending_rub[user_id]
+        return
+
+    product_id, phone, price_rub, price_stars, age, session = product
+
+    delete_phone_product(product_id)
+
+    country_code = get_country_by_phone(phone)
+    add_purchase(user_id, phone, price_rub, price_stars, age, session, country_code)
+
+    awaiting_phone_confirmation[user_id] = {
+        'phone': phone,
+        'product_id': product_id,
+        'session': session
+    }
+
+    del pending_rub[user_id]
+
     try:
         await application.bot.send_message(
             chat_id=user_id,
@@ -1646,54 +1722,110 @@ async def auto_deliver_product(user_id, product_id):
                 [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
             ])
         )
+        logger.info(f"✅ Товар автоматически выдан {user_id}")
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
+
 
 # ==========================================
 # ПОЛУЧЕНИЕ КОДА
 # ==========================================
 
 async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получение кода — с подробным логированием"""
+    logger.info("🔴🔴🔴 get_code_button ВЫЗВАНА! 🔴🔴🔴")
+    
     query = update.callback_query
     await query.answer()
+    
     user_id = query.from_user.id
+    logger.info(f"👤 user_id: {user_id}")
+    logger.info(f"📊 awaiting_phone_confirmation: {awaiting_phone_confirmation}")
+    
     if user_id not in awaiting_phone_confirmation:
-        await query.edit_message_text("❌ Нет номеров для получения кода!")
+        logger.error(f"❌ НЕТ ДАННЫХ ДЛЯ {user_id}")
+        await query.edit_message_text("❌ Нет номеров для получения кода! Оплатите номер сначала.")
         return
+    
     data = awaiting_phone_confirmation[user_id]
     phone = data['phone']
     session = data['session']
-    await query.edit_message_text(f"🔍 *ИЩУ КОД*\n\n📞 {phone}\n⏳ Подключаюсь...", parse_mode="Markdown")
-    code_found, result = await get_last_code_from_account(phone, session)
-    if code_found:
-        await query.edit_message_text(
-            f"🔑 *КОД НАЙДЕН!*\n\n📞 Номер: `{phone}`\n🔑 Код: `{code_found}`\n\n✅ Код подошёл?",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
+    logger.info(f"📞 НОМЕР: {phone}")
+    logger.info(f"🔑 СЕССИЯ: {session[:30]}...")
+    
+    await query.edit_message_text(
+        f"🔍 *ИЩУ КОД ДЛЯ НОМЕРА*\n\n"
+        f"📞 {phone}\n\n"
+        f"⏳ Подключаюсь к аккаунту...",
+        parse_mode="Markdown"
+    )
+    
+    try:
+        code_found, result = await get_last_code_from_account(phone, session)
+        logger.info(f"🔑 РЕЗУЛЬТАТ: code={code_found}, result={result}")
+        
+        if code_found:
+            keyboard = InlineKeyboardMarkup([
                 [btn("✅ КОД ПОДОШЁЛ", "code_ok")],
                 [btn("🔄 НОВЫЙ КОД", "get_code")],
                 [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
             ])
-        )
-    else:
-        await query.edit_message_text(
-            f"⚠️ *КОД НЕ НАЙДЕН*\n\n📞 {phone}\n❌ {result}",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [btn("🔄 ПОВТОРИТЬ", "get_code")],
+            
+            await query.edit_message_text(
+                f"🔑 *САМЫЙ СВЕЖИЙ КОД НАЙДЕН!*\n\n"
+                f"📞 Номер: `{phone}`\n"
+                f"🔑 Код: `{code_found}`\n\n"
+                f"✅ Код подошёл для входа?",
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+        else:
+            keyboard = InlineKeyboardMarkup([
+                [btn("🔄 ПОВТОРИТЬ ПОИСК", "get_code")],
                 [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
             ])
+            
+            await query.edit_message_text(
+                f"⚠️ *КОД НЕ НАЙДЕН*\n\n"
+                f"📞 Номер: `{phone}`\n\n"
+                f"❌ {result}\n\n"
+                f"Попробуйте повторить поиск.",
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+    except Exception as e:
+        logger.error(f"❌ ОШИБКА: {e}")
+        await query.edit_message_text(
+            f"❌ *ОШИБКА ПРИ ПОИСКЕ КОДА*\n\n"
+            f"```\n{str(e)[:200]}\n```\n\n"
+            f"Попробуйте ещё раз.",
+            parse_mode="Markdown"
         )
 
+
+# ==========================================
+# КОД ПОДОШЁЛ
+# ==========================================
+
 async def code_ok_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Код подошёл — показываем кнопку для отзыва"""
     query = update.callback_query
     await query.answer()
+    
     user_id = query.from_user.id
+    
     if user_id in awaiting_phone_confirmation:
         del awaiting_phone_confirmation[user_id]
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ ОСТАВИТЬ ОТЗЫВ", url="https://t.me/poncisnop")],
+        [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
+    ])
+    
     await query.edit_message_text(
         f"🎉 *СДЕЛКА ЗАВЕРШЕНА!*\n\n"
-        f"✅ Код подошёл! Аккаунт ваш!\n\n"
+        f"✅ Код подошёл! Аккаунт ваш!\n"
+        f"Спасибо за покупку! 🙏\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚠️ *ВНИМАНИЕ! ОБЯЗАТЕЛЬНО ПРОЧИТАЙТЕ!* ⚠️\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1705,25 +1837,39 @@ async def code_ok_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔒 *ЭТО ЗАЩИТИТ ВАШ АККАУНТ ОТ ВЗЛОМА!* 🔒\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"⭐ Оставьте отзыв в нашем канале!",
+        f"⭐ Если вам понравилась работа бота,\n"
+        f"оставьте отзыв в нашем канале!",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⭐ ОСТАВИТЬ ОТЗЫВ", url="https://t.me/poncisnop")],
-            [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
-        ])
+        reply_markup=keyboard
     )
 
+
 # ==========================================
-# FLASK-СЕРВЕР
+# FLASK-СЕРВЕР ДЛЯ ВЕБХУКА
 # ==========================================
 
 def start_flask():
+    """Запускает Flask-сервер"""
     flask_app.run(host="0.0.0.0", port=10000, debug=False, use_reloader=False)
+
 
 @flask_app.route('/', methods=['POST'])
 def yoomoney_webhook():
+    """Обработка уведомлений от ЮMoney — с поддержкой тестовых"""
     data = request.form
     logger.info(f"📨 Получен вебхук: {data}")
+    
+    # Обработка пустого тестового уведомления
+    if not data:
+        logger.info("🧪 Получено ТЕСТОВОЕ уведомление (пустое)")
+        return "OK", 200
+    
+    # Проверка на тестовое уведомление
+    if data.get('test_notification') == 'true':
+        logger.info("🧪 Получено ТЕСТОВОЕ уведомление")
+        return "OK", 200
+    
+    # Обработка реального платежа
     if data.get('notification_type') == 'card-incoming':
         label = data.get('label')
         if label and label.startswith('rub_'):
@@ -1731,19 +1877,26 @@ def yoomoney_webhook():
             if len(parts) >= 3:
                 product_id = int(parts[1])
                 user_id = int(parts[2])
+                logger.info(f"💳 РЕАЛЬНЫЙ платёж: user_id={user_id}")
                 asyncio.run_coroutine_threadsafe(
                     auto_deliver_product(user_id, product_id),
                     asyncio.get_event_loop()
                 )
+    
     return "OK", 200
+
 
 @flask_app.route('/', methods=['GET'])
 def webhook_test():
+    """Проверка работы вебхука"""
     return "✅ Webhook работает!", 200
+
 
 logger.info("=" * 60)
 logger.info("✅ ЧАСТЬ 8 ЗАГРУЖЕНА: ОПЛАТА + ПОЛУЧЕНИЕ КОДА + FLASK")
 logger.info("=" * 60)
+
+
 # =====================================================================
 # ЧАСТЬ 9: ЗАПУСК БОТА
 # =====================================================================
