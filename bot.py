@@ -250,6 +250,27 @@ def add_phone_product(phone, price_rub, price_stars, age, session=""):
 def delete_phone_product(product_id):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
+        cursor = conn.cursor()
+        # Проверяем, есть ли такой товар
+        cursor.execute("SELECT id FROM phone_products WHERE id=?", (product_id,))
+        if not cursor.fetchone():
+            logger.warning(f"⚠️ Товар {product_id} уже удалён")
+            conn.close()
+            return True
+        # Удаляем
+        cursor.execute("DELETE FROM phone_products WHERE id=?", (product_id,))
+        conn.commit()
+        affected = cursor.rowcount
+        conn.close()
+        logger.info(f"✅ Удалено {affected} записей (product_id={product_id})")
+        return affected > 0
+    except Exception as e:
+        logger.error(f"❌ Ошибка удаления: {e}")
+        return False
+
+def delete_phone_product(product_id):
+    try:
+        conn = sqlite3.connect(DB_NAME, timeout=10)
         conn.execute("DELETE FROM phone_products WHERE id=?", (product_id,))
         conn.commit()
         conn.close()
@@ -1677,35 +1698,66 @@ async def auto_deliver_product(user_id, product_id):
     """АВТОМАТИЧЕСКАЯ ВЫДАЧА ТОВАРА ПОСЛЕ ОПЛАТЫ РУБЛЯМИ"""
     logger.info(f"🎁 АВТОМАТИЧЕСКАЯ ВЫДАЧА ТОВАРА ДЛЯ {user_id}")
 
-    if user_id not in pending_rub:
-        logger.warning(f"⚠️ Нет ожидающего платежа для {user_id}")
-        return
+    # === ПРОВЕРЯЕМ, ЕСТЬ ЛИ ЗАКАЗ В ОЖИДАНИИ ===
+    phone = None
+    if user_id in pending_rub:
+        pending = pending_rub[user_id]
+        product_id = pending['product_id']
+        phone = pending['phone']
+        logger.info(f"📦 Найден ожидающий заказ: product_id={product_id}, phone={phone}")
+    else:
+        logger.warning(f"⚠️ Нет ожидающего платежа для {user_id}, пробую по product_id={product_id}")
 
-    pending = pending_rub[user_id]
-    product_id = pending['product_id']
-    phone = pending['phone']
-
+    # === ПОЛУЧАЕМ ТОВАР ИЗ БД ===
     product = get_phone_product(product_id)
     if not product:
-        logger.error(f"❌ Товар {product_id} не найден")
-        del pending_rub[user_id]
+        logger.error(f"❌ Товар {product_id} не найден в БД!")
         return
 
     product_id, phone, price_rub, price_stars, age, session = product
+    logger.info(f"📱 Найден товар в БД: {phone}")
 
-    delete_phone_product(product_id)
+    # ✅ ПРОВЕРЯЕМ, ЕСТЬ ЛИ ТОВАР В МАГАЗИНЕ
+    if not product:
+        logger.error(f"❌ Товар {phone} не найден в магазине!")
+        return
 
+    # === УДАЛЯЕМ ИЗ МАГАЗИНА (С ПРОВЕРКОЙ) ===
+    try:
+        delete_result = delete_phone_product(product_id)
+        if delete_result:
+            logger.info(f"✅ Товар {phone} УДАЛЁН из магазина")
+        else:
+            logger.error(f"❌ Ошибка удаления товара {phone} из магазина!")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при удалении: {e}")
+
+    # === ПРОВЕРЯЕМ, УДАЛИЛСЯ ЛИ ===
+    check_product = get_phone_product(product_id)
+    if check_product:
+        logger.error(f"❌ Товар {phone} ВСЁ ЕЩЁ в магазине! Удаление не сработало!")
+    else:
+        logger.info(f"✅ Товар {phone} УСПЕШНО удалён из магазина")
+
+    # === СОХРАНЯЕМ ПОКУПКУ ===
     country_code = get_country_by_phone(phone)
     add_purchase(user_id, phone, price_rub, price_stars, age, session, country_code)
+    logger.info(f"✅ Покупка сохранена в БД")
 
+    # === СОХРАНЯЕМ ДЛЯ ПОЛУЧЕНИЯ КОДА ===
     awaiting_phone_confirmation[user_id] = {
         'phone': phone,
         'product_id': product_id,
         'session': session
     }
+    logger.info(f"✅ Данные сохранены для получения кода")
 
-    del pending_rub[user_id]
+    # === УДАЛЯЕМ ИЗ ОЖИДАНИЯ ===
+    if user_id in pending_rub:
+        del pending_rub[user_id]
+        logger.info(f"✅ pending_rub очищен для {user_id}")
 
+    # === ОТПРАВЛЯЕМ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЮ ===
     try:
         await application.bot.send_message(
             chat_id=user_id,
@@ -1716,10 +1768,23 @@ async def auto_deliver_product(user_id, product_id):
                 [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
             ])
         )
-        logger.info(f"✅ Товар автоматически выдан {user_id}")
+        logger.info(f"✅ Сообщение отправлено пользователю {user_id}")
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
-
+        # Запасной вариант через requests
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            message = generate_product_message(phone, age, price_rub, price_stars)
+            keyboard = {"inline_keyboard": [[{"text": "🔑 ПОЛУЧИТЬ КОД", "callback_data": "get_code"}]]}
+            requests.post(url, json={
+                "chat_id": user_id,
+                "text": message,
+                "parse_mode": "Markdown",
+                "reply_markup": keyboard
+            }, timeout=5)
+            logger.info(f"✅ Сообщение отправлено через requests")
+        except Exception as e2:
+            logger.error(f"❌ Ошибка через requests: {e2}")
 # ==========================================
 # ГЕНЕРАЦИЯ СООБЩЕНИЯ С ТОВАРОМ
 # ==========================================
