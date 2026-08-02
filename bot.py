@@ -1693,20 +1693,9 @@ async def check_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================
 # АВТОМАТИЧЕСКАЯ ВЫДАЧА ТОВАРА (ДЛЯ ВЕБХУКА)
 # ==========================================
-
 async def auto_deliver_product(user_id, product_id):
     """АВТОМАТИЧЕСКАЯ ВЫДАЧА ТОВАРА ПОСЛЕ ОПЛАТЫ РУБЛЯМИ"""
     logger.info(f"🎁 АВТОМАТИЧЕСКАЯ ВЫДАЧА ТОВАРА ДЛЯ {user_id}")
-
-    # === ПРОВЕРЯЕМ, ЕСТЬ ЛИ ЗАКАЗ В ОЖИДАНИИ ===
-    phone = None
-    if user_id in pending_rub:
-        pending = pending_rub[user_id]
-        product_id = pending['product_id']
-        phone = pending['phone']
-        logger.info(f"📦 Найден ожидающий заказ: product_id={product_id}, phone={phone}")
-    else:
-        logger.warning(f"⚠️ Нет ожидающего платежа для {user_id}, пробую по product_id={product_id}")
 
     # === ПОЛУЧАЕМ ТОВАР ИЗ БД ===
     product = get_phone_product(product_id)
@@ -1717,32 +1706,38 @@ async def auto_deliver_product(user_id, product_id):
     product_id, phone, price_rub, price_stars, age, session = product
     logger.info(f"📱 Найден товар в БД: {phone}")
 
-    # ✅ ПРОВЕРЯЕМ, ЕСТЬ ЛИ ТОВАР В МАГАЗИНЕ
-    if not product:
-        logger.error(f"❌ Товар {phone} не найден в магазине!")
-        return
-
-    # === УДАЛЯЕМ ИЗ МАГАЗИНА (С ПРОВЕРКОЙ) ===
-    try:
-        delete_result = delete_phone_product(product_id)
-        if delete_result:
-            logger.info(f"✅ Товар {phone} УДАЛЁН из магазина")
-        else:
-            logger.error(f"❌ Ошибка удаления товара {phone} из магазина!")
-    except Exception as e:
-        logger.error(f"❌ Ошибка при удалении: {e}")
-
-    # === ПРОВЕРЯЕМ, УДАЛИЛСЯ ЛИ ===
-    check_product = get_phone_product(product_id)
-    if check_product:
-        logger.error(f"❌ Товар {phone} ВСЁ ЕЩЁ в магазине! Удаление не сработало!")
+    # === УДАЛЯЕМ ИЗ МАГАЗИНА ===
+    delete_result = delete_phone_product(product_id)
+    if delete_result:
+        logger.info(f"✅ Товар {phone} УДАЛЁН из магазина")
     else:
-        logger.info(f"✅ Товар {phone} УСПЕШНО удалён из магазина")
+        logger.error(f"❌ Ошибка удаления товара {phone}!")
 
-    # === СОХРАНЯЕМ ПОКУПКУ ===
+    # === СОХРАНЯЕМ ПОКУПКУ (С ПРОВЕРКОЙ) ===
     country_code = get_country_by_phone(phone)
-    add_purchase(user_id, phone, price_rub, price_stars, age, session, country_code)
-    logger.info(f"✅ Покупка сохранена в БД")
+    if not country_code:
+        country_code = "UNKNOWN"
+        logger.warning(f"⚠️ Страна не найдена для {phone}, установлено UNKNOWN")
+    
+    logger.info(f"📝 Сохраняем покупку: user_id={user_id}, phone={phone}, country_code={country_code}")
+    
+    try:
+        purchase_result = add_purchase(user_id, phone, price_rub, price_stars, age, session, country_code)
+        if purchase_result:
+            logger.info(f"✅ Покупка сохранена в БД: {phone}")
+        else:
+            logger.error(f"❌ add_purchase вернула False для {phone}!")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении покупки: {e}")
+
+    # === ПРОВЕРЯЕМ, СОХРАНИЛАСЬ ЛИ ===
+    purchases = get_user_purchases(user_id)
+    if purchases:
+        logger.info(f"✅ Найдено {len(purchases)} покупок у пользователя {user_id}")
+        for p in purchases:
+            logger.info(f"   📱 {p[1]} - {p[2]}₽ / {p[3]}⭐")
+    else:
+        logger.error(f"❌ У пользователя {user_id} НЕТ покупок в БД!")
 
     # === СОХРАНЯЕМ ДЛЯ ПОЛУЧЕНИЯ КОДА ===
     awaiting_phone_confirmation[user_id] = {
@@ -1771,7 +1766,6 @@ async def auto_deliver_product(user_id, product_id):
         logger.info(f"✅ Сообщение отправлено пользователю {user_id}")
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
-        # Запасной вариант через requests
         try:
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
             message = generate_product_message(phone, age, price_rub, price_stars)
