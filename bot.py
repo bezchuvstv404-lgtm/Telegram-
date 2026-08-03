@@ -2048,7 +2048,11 @@ def webhook_test():
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"❌ Ошибка: {context.error}")
-    if update and update.effective_mes
+    if update and update.effective_message:
+        try:
+            await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуйте позже.")
+        except:
+            pass
   # ЧАСТЬ 9: ЗАПУСК БОТА
 # =====================================================================
 
