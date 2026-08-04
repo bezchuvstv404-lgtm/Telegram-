@@ -2,7 +2,7 @@
 # КОНФИГУРАЦИЯ (ЛИЧНЫЕ ДАННЫЕ)
 # ==========================================
 
-BOT_TOKEN = "8254882046:AAFfPJjPGafPs2Me_ApykXj1yoWG4rrJSbY"
+BOT_TOKEN = ""
 ADMIN_ID = 5451203188
 API_ID = 37929729
 API_HASH = "a9b0048cb977e7efe52c0e9ebef901e1"
