@@ -3,14 +3,14 @@
 # ==========================================
 
 BOT_TOKEN = ""
-ADMIN_ID = 5451203188
-API_ID = 37929729
-API_HASH = "a9b0048cb977e7efe52c0e9ebef901e1"
-YOOMONEY_WALLET = "4100119486619208"
+ADMIN_ID = 
+API_ID = 
+API_HASH = ""
+YOOMONEY_WALLET = ""
 DB_NAME = 'shop.db'
-CHANNEL_ID = -1003449054946
-ADMIN_CHAT_ID = 5451203188
-ADMINS = [5451203188]
+CHANNEL_ID = 
+ADMIN_CHAT_ID = 
+ADMINS = []
 
 # ==========================================
 # БАЗА СТРАН (100+ САМЫХ ПОПУЛЯРНЫХ)
