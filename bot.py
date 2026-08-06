@@ -406,29 +406,6 @@ async def check_yoomoney_payment_async(label):
     except Exception as e:
         return False
 
-def generate_product_message(phone, age, price_rub, price_stars):
-    """Генерирует сообщение с полным номером и предупреждениями"""
-    country_code = get_country_by_phone(phone)
-    country = get_country_by_code(country_code) if country_code else None
-    flag = country['flag'] if country else "🌍"
-    name = country['name'] if country else "Неизвестно"
-    code = country['phone_code'] if country else ""
-    
-    return (
-        f"✅ *ОПЛАЧЕНО!*\n\n"
-        f"🌍 *Страна:* {flag} {name} ({code})\n"
-        f"📱 *ВАШ НОМЕР:* `{phone}`\n"
-        f"📅 *Возраст:* {age} дней\n"
-        f"💰 {price_rub} ₽ / {price_stars}⭐\n\n"
-        f"---\n"
-        f"⚠️ *ПОСЛЕ ВХОДА В АККАУНТ ОБЯЗАТЕЛЬНО:*\n"
-        f"1️⃣ Смените номер телефона на свой\n"
-        f"2️⃣ Поставьте двухфакторную аутентификацию (2FA)\n"
-        f"3️⃣ Установите облачный пароль\n"
-        f"4️⃣ Привяжите почту для восстановления\n\n"
-        f"🔑 Нажмите кнопку, чтобы получить код для входа:"
-    )
-
 logger.info("=" * 60)
 logger.info("✅ ЧАСТЬ 3 ЗАГРУЖЕНА: ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ")
 logger.info("=" * 60)
