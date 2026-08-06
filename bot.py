@@ -780,21 +780,7 @@ async def make_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Оно будет отправлено администратору."
     )
 
-    await query.answer()
-    rows = [
-        [btn("🛒 МАГАЗИН", "shop")],
-        [btn("📦 МОИ ПОКУПКИ", "my_purchases")],
-        [btn("⭐ ОТЗЫВЫ", "reviews")],
-        [btn("💡 ПРЕДЛОЖКА", "offer")],
-        [btn("🆘 ПОДДЕРЖКА", "support")]
-    ]
-    if is_admin(user_id):
-        rows.append([btn("👥 АДМИН-ПАНЕЛЬ", "admin_panel")])
-    text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
-    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
-
     return AWAITING_OFFER
-
 
 async def receive_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -830,6 +816,9 @@ async def receive_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Ваше предложение отправлено администратору!\n"
         "Когда будет принято решение, вы получите уведомление."
     )
+
+    # Возвращаем пользователя в главное меню
+    await show_main_menu(update, user.id)
     return ConversationHandler.END
 
 
@@ -1074,17 +1063,6 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📅 {creation_text}\n"
             f"⏳ {age_text} дней"
         )
-        rows = [
-            [btn("🛒 МАГАЗИН", "shop")],
-            [btn("📦 МОИ ПОКУПКИ", "my_purchases")],
-            [btn("⭐ ОТЗЫВЫ", "reviews")],
-            [btn("👨‍❤️‍💋‍👨 ПРЕДЛОЖКА", "offer")],
-            [btn("🆘 ПОДДЕРЖКА", "support")]
-        ]
-        if is_admin(user_id):
-            rows.append([btn("👥 АДМИН-ПАНЕЛЬ", "admin_panel")])
-        text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
         if result:
             await update.message.reply_text(
                 f"✅ НОМЕР ДОБАВЛЕН!\n\n"
@@ -1094,6 +1072,18 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⭐ {price_stars} Stars\n"
                 f"📅 {age} дней"
             )
+
+            rows = [
+                [btn("🛒 МАГАЗИН", "shop")],
+                [btn("📦 МОИ ПОКУПКИ", "my_purchases")],
+                [btn("⭐ ОТЗЫВЫ", "reviews")],
+                [btn("💡 ПРЕДЛОЖКА", "offer")],
+                [btn("🆘 ПОДДЕРЖКА", "support")]
+            ]
+            if is_admin(user_id):
+                rows.append([btn("👥 АДМИН-ПАНЕЛЬ", "admin_panel")])
+            text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
+            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
         else:
             await update.message.reply_text("❌ Ошибка добавления!")
         return ConversationHandler.END
