@@ -923,6 +923,21 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📅 {creation_text}\n"
             f"⏳ {age_text} дней"
         )
+        rows = [
+            [btn("🛒 МАГАЗИН", "shop")],
+            [btn("📦 МОИ ПОКУПКИ", "my_purchases")],
+            [btn("⭐ ОТЗЫВЫ", "reviews")],
+            [btn("🆘 ПОДДЕРЖКА", "support")]
+        ]
+        if is_admin(user_id):
+            rows.append([btn("👥 АДМИН-ПАНЕЛЬ", "admin_panel")])
+        text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
+        if hasattr(update_or_query, 'message') and update_or_query.message:
+            await update_or_query.message.reply_text(text, parse_mode="Markdown",
+                                                     reply_markup=InlineKeyboardMarkup(rows))
+        else:
+            await update_or_query.edit_message_text(text, parse_mode="Markdown",
+                                                    reply_markup=InlineKeyboardMarkup(rows))
         if result:
             await update.message.reply_text(
                 f"✅ НОМЕР ДОБАВЛЕН!\n\n"
