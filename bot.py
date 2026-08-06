@@ -755,6 +755,9 @@ async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
     rows = [
         [btn("🛒 МАГАЗИН", "shop")],
         [btn("📦 МОИ ПОКУПКИ", "my_purchases")],
@@ -765,10 +768,7 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_admin(user_id):
         rows.append([btn("👥 АДМИН-ПАНЕЛЬ", "admin_panel")])
     text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
-    if hasattr(update_or_query, 'message') and update_or_query.message:
-        await update_or_query.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
-    else:
-        await update_or_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def make_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -779,21 +779,6 @@ async def make_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✍️ Напишите ваше предложение одним сообщением.\n"
         "Оно будет отправлено администратору."
     )
-
-    rows = [
-        [btn("🛒 МАГАЗИН", "shop")],
-        [btn("📦 МОИ ПОКУПКИ", "my_purchases")],
-        [btn("⭐ ОТЗЫВЫ", "reviews")],
-        [btn("💡 ПРЕДЛОЖКА", "offer")],
-        [btn("🆘 ПОДДЕРЖКА", "support")]
-    ]
-    if is_admin(user_id):
-        rows.append([btn("👥 АДМИН-ПАНЕЛЬ", "admin_panel")])
-    text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
-    if hasattr(update_or_query, 'message') and update_or_query.message:
-        await update_or_query.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
-    else:
-        await update_or_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
 
     return AWAITING_OFFER
 
@@ -1086,12 +1071,7 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_admin(user_id):
             rows.append([btn("👥 АДМИН-ПАНЕЛЬ", "admin_panel")])
         text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
-        if hasattr(update_or_query, 'message') and update_or_query.message:
-            await update_or_query.message.reply_text(text, parse_mode="Markdown",
-                                                     reply_markup=InlineKeyboardMarkup(rows))
-        else:
-            await update_or_query.edit_message_text(text, parse_mode="Markdown",
-                                                    reply_markup=InlineKeyboardMarkup(rows))
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
         if result:
             await update.message.reply_text(
                 f"✅ НОМЕР ДОБАВЛЕН!\n\n"
@@ -1163,12 +1143,7 @@ async def add_phone_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if is_admin(user_id):
                 rows.append([btn("👥 АДМИН-ПАНЕЛЬ", "admin_panel")])
             text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
-            if hasattr(update_or_query, 'message') and update_or_query.message:
-                await update_or_query.message.reply_text(text, parse_mode="Markdown",
-                                                         reply_markup=InlineKeyboardMarkup(rows))
-            else:
-                await update_or_query.edit_message_text(text, parse_mode="Markdown",
-                                                        reply_markup=InlineKeyboardMarkup(rows))
+            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
 
         else:
             await update.message.reply_text("❌ Ошибка добавления!")
