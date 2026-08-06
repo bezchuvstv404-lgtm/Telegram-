@@ -47,8 +47,8 @@ try:
         CHANNEL_ID,
         ADMIN_CHAT_ID,
         ADMINS,
-        COUNTRIES
-    )
+        COUNTRIES, HELPER_ID
+)
     print("✅ Конфигурация загружена из config.py")
 except ImportError:
     print("⚠️ Файл config.py не найден! БОТ НЕ ЗАПУСТИТСЯ!")
@@ -85,6 +85,14 @@ ADD_ADMIN = 30
 REMOVE_ADMIN = 31
 EDIT_PRICE = 40
 EDIT_STARS = 41
+AWAITING_OFFER = 50
+
+# ==========================================
+# КОНСТАНТЫ ДЛЯ ПРЕДЛОЖЕНИЙ
+# ==========================================
+CALLBACK_OFFER = "offer"
+CALLBACK_ACCEPT = "accept_offer"
+CALLBACK_REJECT = "reject_offer"
 
 # ==========================================
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
@@ -589,6 +597,7 @@ async def show_main_menu(update_or_query, user_id):
         [btn("🛒 МАГАЗИН", "shop")],
         [btn("📦 МОИ ПОКУПКИ", "my_purchases")],
         [btn("⭐ ОТЗЫВЫ", "reviews")],
+        [btn("💡 ПРЕДЛОЖКА", "offer")],
         [btn("🆘 ПОДДЕРЖКА", "support")]
     ]
     if is_admin(user_id):
@@ -717,6 +726,134 @@ async def reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=keyboard
     )
+
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[btn("Предложение", CALLBACK_OFFER)]])
+
+
+def offer_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [btn("Сделать своё предложение", "make_offer" )],
+            [btn("Назад", "start")],
+        ]
+    )
+
+
+# ─── Хендлеры ───────────────────────────────────────────────────────────
+async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    await query.edit_message_text(
+        "💡 Вы можете сделать предложение по улучшению бота!\n\n"
+        "Нажмите «Сделать своё предложение», затем отправьте вашу идею "
+        "одним сообщением — она будет передана администратору.",
+        reply_markup=offer_menu_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rows = [
+        [btn("🛒 МАГАЗИН", "shop")],
+        [btn("📦 МОИ ПОКУПКИ", "my_purchases")],
+        [btn("⭐ ОТЗЫВЫ", "reviews")],
+        [btn("💡 ПРЕДЛОЖКА", "offer")],
+        [btn("🆘 ПОДДЕРЖКА", "support")]
+    ]
+    if is_admin(user_id):
+        rows.append([btn("👥 АДМИН-ПАНЕЛЬ", "admin_panel")])
+    text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
+    if hasattr(update_or_query, 'message') and update_or_query.message:
+        await update_or_query.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
+    else:
+        await update_or_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def make_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    await query.edit_message_text(
+        "✍️ Напишите ваше предложение одним сообщением.\n"
+        "Оно будет отправлено администратору."
+    )
+    return AWAITING_OFFER
+
+
+async def receive_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    offer_text = update.message.text
+
+    author = f"{user.full_name} (@{user.username})" if user.username else user.full_name
+    time_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    admin_text = (
+        f"📩 Новое предложение!\n\n"
+        f"💬 {offer_text}\n\n"
+        f"👤 Отправитель: {author}\n"
+        f"🕒 Время: {time_str}"
+    )
+
+    # Кнопки для администратора (с ID автора в данных)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                btn("Принять", f"{CALLBACK_ACCEPT}:{user.id}"),
+                btn("Отклонить", f"{CALLBACK_REJECT}:{user.id}"),
+            ]
+        ]
+    )
+
+    await context.bot.send_message(
+        chat_id=HELPER_ID,
+        text=admin_text,
+        reply_markup=keyboard,
+    )
+
+    await update.message.reply_text(
+        "✅ Ваше предложение отправлено администратору!\n"
+        "Когда будет принято решение, вы получите уведомление."
+    )
+    return ConversationHandler.END
+
+
+async def accept_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    _, user_id = query.data.split(":")
+    user_id = int(user_id)
+
+    await query.edit_message_text(
+        query.message.text + "\n\n✅ Предложение принято!"
+    )
+
+    await context.bot.send_message(
+        chat_id=user_id,
+        text="✅ Ваше предложение было принято администратором!",
+    )
+    return ConversationHandler.END
+
+
+async def reject_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    _, user_id = query.data.split(":")
+    user_id = int(user_id)
+
+    await query.edit_message_text(
+        query.message.text + "\n\n❌ Предложение отклонено!"
+    )
+
+    await context.bot.send_message(
+        chat_id=user_id,
+        text="❌ Ваше предложение было отклонено администратором.",
+    )
+    return ConversationHandler.END
+
 
 async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -927,6 +1064,7 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [btn("🛒 МАГАЗИН", "shop")],
             [btn("📦 МОИ ПОКУПКИ", "my_purchases")],
             [btn("⭐ ОТЗЫВЫ", "reviews")],
+            [btn("👨‍❤️‍💋‍👨 ПРЕДЛОЖКА", "offer")],
             [btn("🆘 ПОДДЕРЖКА", "support")]
         ]
         if is_admin(user_id):
@@ -1335,71 +1473,6 @@ async def purchase_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def purchase_get_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    purchase_id = int(query.data.replace("purchase_get_code_", ""))
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-async def my_purchases(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    purchases = get_user_purchases(user_id)
-    if not purchases:
-        await query.edit_message_text("📦 *МОИ ПОКУПКИ*\n\nУ вас пока нет покупок.", parse_mode="Markdown", reply_markup=back("start"))
-        return
-    rows = []
-    for purchase in purchases:
-        pid, phone, price_rub, price_stars, age, session, country_code, purchased_at = purchase
-        country = get_country_by_code(country_code) if country_code else None
-        flag = country['flag'] if country else "🌍"
-        code = country['phone_code'] if country else ""
-        rows.append([btn(f"{flag} {code} {phone}", f"purchase_code_{pid}")])
-    rows.append([btn("🗑️ ОЧИСТИТЬ ИСТОРИЮ", "clear_purchases")])
-    rows.append([btn("🔙 НАЗАД", "start")])
-    await query.edit_message_text(
-        f"📦 *МОИ ПОКУПКИ*\n\n📱 Всего покупок: {len(purchases)}\n\nВыберите номер для просмотра информации:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(rows)
-    )
-
-
-async def purchase_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    purchase_id = int(query.data.replace("purchase_code_", ""))
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    row = conn.execute("SELECT phone, price_rub, price_stars, age, session, country_code, purchased_at FROM purchases WHERE id=?", (purchase_id,)).fetchone()
-    conn.close()
-    if not row:
-        await query.edit_message_text("❌ Покупка не найдена", reply_markup=back("my_purchases"))
-        return
-    phone, price_rub, price_stars, age, session, country_code, purchased_at = row
-    country = get_country_by_code(country_code) if country_code else None
-    flag = country['flag'] if country else "🌍"
-    name = country['name'] if country else "Неизвестно"
-    code = country['phone_code'] if country else ""
-    date_str = purchased_at if isinstance(purchased_at, str) else str(purchased_at)
-    await query.edit_message_text(
-        f"📱 *ИНФОРМАЦИЯ О НОМЕРЕ*\n\n"
-        f"🌍 *Страна:* {flag} {name} ({code})\n"
-        f"📞 *Номер:* `{phone}`\n"
-        f"📅 *Возраст:* {age} дней\n"
-        f"💰 *Цена:* {price_rub} ₽ / {price_stars}⭐\n"
-        f"📆 *Дата покупки:* {date_str}\n\n"
-        f"---\n"
-        f"⚠️ *ПОСЛЕ ВХОДА В АККАУНТ ОБЯЗАТЕЛЬНО:*\n"
-        f"1️⃣ Смените номер телефона на свой\n"
-        f"2️⃣ Поставьте двухфакторную аутентификацию (2FA)\n"
-        f"3️⃣ Установите облачный пароль\n"
-        f"4️⃣ Привяжите почту для восстановления\n\n"
-        f"🔑 Нажмите кнопку, чтобы получить код:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [btn("🔑 ПОЛУЧИТЬ КОД", f"purchase_get_code_{purchase_id}")],
-            [btn("🔙 К МОИМ ПОКУПКАМ", "my_purchases")]
-        ])
-    )
 
 
 async def purchase_get_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2124,11 +2197,19 @@ def main():
         fallbacks=[CommandHandler("start", start)]
     )
     
+    # ConversationHandler для предложений
+    offer_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(make_offer, pattern="^make_offer$")],
+        states={AWAITING_OFFER: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_offer)]},
+        fallbacks=[CommandHandler("start", start)]
+    )
+    
     # === РЕГИСТРАЦИЯ ВСЕХ ОБРАБОТЧИКОВ ===
     app.add_handler(add_admin_conv)
     app.add_handler(add_phone_conv)
     app.add_handler(edit_rub_conv)
     app.add_handler(edit_stars_conv)
+    app.add_handler(offer_conv)
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(start_callback, pattern="^start$"))
@@ -2136,6 +2217,9 @@ def main():
     app.add_handler(CallbackQueryHandler(agree_terms, pattern="^agree_terms$"))
     app.add_handler(CallbackQueryHandler(disagree_terms, pattern="^disagree_terms$"))
     app.add_handler(CallbackQueryHandler(reviews, pattern="^reviews$"))
+    app.add_handler(CallbackQueryHandler(offer, pattern="^offer$"))
+    app.add_handler(CallbackQueryHandler(accept_offer, pattern="^accept_offer:\\d+$"))
+    app.add_handler(CallbackQueryHandler(reject_offer, pattern="^reject_offer:\\d+$"))
     app.add_handler(CallbackQueryHandler(support, pattern="^support$"))
     app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
     app.add_handler(CallbackQueryHandler(remove_admin, pattern="^remove_admin$"))
