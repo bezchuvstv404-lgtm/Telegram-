@@ -803,7 +803,6 @@ async def receive_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Когда будет принято решение, вы получите уведомление."
     )
 
-    # Возвращаем пользователя в главное меню
     await show_main_menu(update, user.id)
     return ConversationHandler.END
 
@@ -1444,7 +1443,6 @@ async def my_purchases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(rows)
     )
 
-
 async def purchase_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1481,9 +1479,6 @@ async def purchase_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [btn("🔙 К МОИМ ПОКУПКАМ", "my_purchases")]
         ])
     )
-
-
-
 
 async def purchase_get_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1547,7 +1542,6 @@ async def purchase_ok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
-
 async def clear_purchases_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1570,7 +1564,6 @@ async def clear_purchases_start(update: Update, context: ContextTypes.DEFAULT_TY
         ])
     )
 
-
 async def clear_purchases_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1582,7 +1575,6 @@ async def clear_purchases_yes(update: Update, context: ContextTypes.DEFAULT_TYPE
         parse_mode="Markdown",
         reply_markup=back("my_purchases")
     )
-
 
 logger.info("=" * 60)
 logger.info("✅ ЧАСТЬ 7 ЗАГРУЖЕНА: ДОБАВЛЕНИЕ НОМЕРА + МАГАЗИН + МОИ ПОКУПКИ")
@@ -1660,6 +1652,10 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "product_id": product_id,
         "session": session
     }
+
+    # === ОТПРАВЛЯЕМ УВЕДОМЛЕНИЕ ОБ ОПЛАТЕ ЗВЁЗДАМИ (как в yoomoney_webhook) ===
+    username = update.effective_user.username if update.effective_user else None
+    send_stars_notification_to_telegram(user_id, username, phone, age, price_stars, price_rub, product_id)
 
     await update.message.reply_text(
         generate_product_message(phone, age, price_rub, price_stars),
@@ -2014,7 +2010,6 @@ async def code_ok_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================
 
 def send_notification_to_telegram(data):
-    """Отправляет уведомление от ЮMoney в Telegram (для реальных и тестовых)"""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         
@@ -2098,13 +2093,77 @@ def send_notification_to_telegram(data):
         logger.error(f"❌ Ошибка отправки уведомления: {e}")
 
 # ==========================================
+# ОТПРАВКА УВЕДОМЛЕНИЙ ОБ ОПЛАТЕ ЗВЁЗДАМИ
+# ==========================================
+
+def send_stars_notification_to_telegram(user_id, username, phone, age, price_stars, price_rub, product_id):
+    """Отправляет уведомление об оплате звёздами в Telegram (как в yoomoney_webhook)"""
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        
+        # === ОПРЕДЕЛЯЕМ СТРАНУ ===
+        country_code = get_country_by_phone(phone)
+        country = get_country_by_code(country_code) if country_code else None
+        country_flag = country['flag'] if country else "🌍"
+        country_name = country['name'] if country else "Неизвестно"
+        
+        # === СКРЫТЫЙ НОМЕР ===
+        hidden_phone = f"{phone[:4]}****{phone[-4:]}" if len(phone) > 6 else phone
+        
+        # === ДАТА И ВРЕМЯ ===
+        datetime_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+        
+        # === ФОРМИРУЕМ СООБЩЕНИЕ ===
+        message = (
+            f"⭐ *ОПЛАТА ЗВЁЗДАМИ*\n\n"
+            f"📌 Тип: Оплата Telegram Stars\n"
+            f"💰 Сумма: {price_stars} ⭐\n"
+            f"💵 Эквивалент: {price_rub} ₽\n"
+            f"👤 Покупатель: `{user_id}`\n"
+            f"🆔 Username: @{username if username else 'Нет'}\n"
+            f"🌍 Страна: {country_flag} {country_name}\n"
+            f"📱 Номер: `{hidden_phone}`\n"
+            f"📅 Возраст: {age} дней\n"
+            f"🏷️ Товар ID: `{product_id}`\n"
+            f"📅 Дата: {datetime_str}\n\n"
+            f"✅ Статус: ОПЛАЧЕНО"
+        )
+        
+        # === ОТПРАВЛЯЕМ АДМИНУ ===
+        response = requests.post(
+            url,
+            json={
+                "chat_id": ADMIN_CHAT_ID,
+                "text": message,
+                "parse_mode": "Markdown"
+            },
+            timeout=5
+        )
+        response = requests.post(
+            url,
+            json={
+                "chat_id": HELPER_ID,
+                "text": message,
+                "parse_mode": "Markdown"
+            },
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Уведомление об оплате звёздами отправлено в Telegram")
+        else:
+            logger.error(f"❌ Ошибка отправки: {response.status_code}")
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки уведомления об оплате звёздами: {e}")
+
+# ==========================================
 # FLASK-СЕРВЕР ДЛЯ ВЕБХУКА
 # ==========================================
 
 def start_flask():
     """Запускает Flask-сервер"""
     flask_app.run(host="0.0.0.0", port=10000, debug=False, use_reloader=False)
-
 
 @flask_app.route('/', methods=['POST'])
 def yoomoney_webhook():
