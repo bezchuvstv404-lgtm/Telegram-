@@ -1655,7 +1655,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # === ОТПРАВЛЯЕМ УВЕДОМЛЕНИЕ ОБ ОПЛАТЕ ЗВЁЗДАМИ (как в yoomoney_webhook) ===
     username = update.effective_user.username if update.effective_user else None
-    send_stars_notification_to_telegram(user_id, username, phone, age, price_stars, price_rub, product_id)
+    await send_stars_notification_to_telegram(context, user_id, username, phone, age, price_stars, price_rub, product_id)
 
     await update.message.reply_text(
         generate_product_message(phone, age, price_rub, price_stars),
@@ -2096,11 +2096,9 @@ def send_notification_to_telegram(data):
 # ОТПРАВКА УВЕДОМЛЕНИЙ ОБ ОПЛАТЕ ЗВЁЗДАМИ
 # ==========================================
 
-def send_stars_notification_to_telegram(user_id, username, phone, age, price_stars, price_rub, product_id):
+async def send_stars_notification_to_telegram(context, user_id, username, phone, age, price_stars, price_rub, product_id):
     """Отправляет уведомление об оплате звёздами в Telegram (как в yoomoney_webhook)"""
     try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        
         # === ОПРЕДЕЛЯЕМ СТРАНУ ===
         country_code = get_country_by_phone(phone)
         country = get_country_by_code(country_code) if country_code else None
@@ -2129,31 +2127,11 @@ def send_stars_notification_to_telegram(user_id, username, phone, age, price_sta
             f"✅ Статус: ОПЛАЧЕНО"
         )
         
-        # === ОТПРАВЛЯЕМ АДМИНУ ===
-        response = requests.post(
-            url,
-            json={
-                "chat_id": ADMIN_CHAT_ID,
-                "text": message,
-                "parse_mode": "Markdown"
-            },
-            timeout=5
-        )
-        response = requests.post(
-            url,
-            json={
-                "chat_id": HELPER_ID,
-                "text": message,
-                "parse_mode": "Markdown"
-            },
-            timeout=5
-        )
+        # === ОТПРАВЛЯЕМ АДМИНУ ЧЕРЕЗ БОТА (надёжно) ===
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message, parse_mode="Markdown")
+        await context.bot.send_message(chat_id=HELPER_ID, text=message, parse_mode="Markdown")
         
-        if response.status_code == 200:
-            logger.info(f"✅ Уведомление об оплате звёздами отправлено в Telegram")
-        else:
-            logger.error(f"❌ Ошибка отправки: {response.status_code}")
-            
+        logger.info(f"✅ Уведомление об оплате звёздами отправлено в Telegram")
     except Exception as e:
         logger.error(f"❌ Ошибка отправки уведомления об оплате звёздами: {e}")
 
