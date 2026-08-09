@@ -10,6 +10,7 @@ import logging
 import aiohttp
 import requests
 import time
+import html
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
@@ -2099,37 +2100,42 @@ def send_notification_to_telegram(data):
 async def send_stars_notification_to_telegram(context, user_id, username, phone, age, price_stars, price_rub, product_id):
     """Отправляет уведомление об оплате звёздами в Telegram (как в yoomoney_webhook)"""
     try:
+        # === ЭКРАНИРУЕМ ДИНАМИЧЕСКИЕ ЗНАЧЕНИЯ ДЛЯ HTML ===
+        safe_username = html.escape(username) if username else "Нет"
+        
         # === ОПРЕДЕЛЯЕМ СТРАНУ ===
         country_code = get_country_by_phone(phone)
         country = get_country_by_code(country_code) if country_code else None
         country_flag = country['flag'] if country else "🌍"
         country_name = country['name'] if country else "Неизвестно"
+        safe_country_name = html.escape(country_name)
         
         # === СКРЫТЫЙ НОМЕР ===
         hidden_phone = f"{phone[:4]}****{phone[-4:]}" if len(phone) > 6 else phone
+        safe_hidden_phone = html.escape(hidden_phone)
         
         # === ДАТА И ВРЕМЯ ===
         datetime_str = datetime.now().strftime("%d.%m.%Y %H:%M")
         
-        # === ФОРМИРУЕМ СООБЩЕНИЕ ===
+        # === ФОРМИРУЕМ СООБЩЕНИЕ В HTML (безопасно от спецсимволов) ===
         message = (
-            f"⭐ *ОПЛАТА ЗВЁЗДАМИ*\n\n"
+            f"⭐ <b>ОПЛАТА ЗВЁЗДАМИ</b>\n\n"
             f"📌 Тип: Оплата Telegram Stars\n"
             f"💰 Сумма: {price_stars} ⭐\n"
             f"💵 Эквивалент: {price_rub} ₽\n"
-            f"👤 Покупатель: `{user_id}`\n"
-            f"🆔 Username: @{username if username else 'Нет'}\n"
-            f"🌍 Страна: {country_flag} {country_name}\n"
-            f"📱 Номер: `{hidden_phone}`\n"
+            f"👤 Покупатель: <code>{user_id}</code>\n"
+            f"🆔 Username: @{safe_username}\n"
+            f"🌍 Страна: {country_flag} {safe_country_name}\n"
+            f"📱 Номер: <code>{safe_hidden_phone}</code>\n"
             f"📅 Возраст: {age} дней\n"
-            f"🏷️ Товар ID: `{product_id}`\n"
+            f"🏷️ Товар ID: <code>{product_id}</code>\n"
             f"📅 Дата: {datetime_str}\n\n"
             f"✅ Статус: ОПЛАЧЕНО"
         )
         
         # === ОТПРАВЛЯЕМ АДМИНУ ЧЕРЕЗ БОТА (надёжно) ===
-        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message, parse_mode="Markdown")
-        await context.bot.send_message(chat_id=HELPER_ID, text=message, parse_mode="Markdown")
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message, parse_mode="HTML")
+        await context.bot.send_message(chat_id=HELPER_ID, text=message, parse_mode="HTML")
         
         logger.info(f"✅ Уведомление об оплате звёздами отправлено в Telegram")
     except Exception as e:
