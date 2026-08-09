@@ -2079,6 +2079,15 @@ def send_notification_to_telegram(data):
             },
             timeout=5
         )
+        response = requests.post(
+            url,
+            json={
+                "chat_id": HELPER_ID,
+                "text": message,
+                "parse_mode": "Markdown"
+            },
+            timeout=5
+        )
         
         if response.status_code == 200:
             logger.info(f"✅ Уведомление отправлено в Telegram")
