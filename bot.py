@@ -2156,16 +2156,7 @@ def send_notification_to_telegram(data):
         amount = data.get('amount', '0')
         sender = data.get('sender', 'Неизвестно')
         label = data.get('label', 'Отсутствует')
-        operation_id = data.get('operation_id', 'Неизвестно')
         datetime_str = data.get('datetime', 'Неизвестно')
-
-        # === ОПРЕДЕЛЯЕМ ЭМОДЗИ И ТИП ===
-        if is_test:
-            emoji = "🧪"
-            type_text = "ТЕСТОВОЕ УВЕДОМЛЕНИЕ"
-        else:
-            emoji = "💳"
-            type_text = "НОВАЯ ОПЛАТА"
 
         # === ОПРЕДЕЛЯЕМ ПОДТИП ПЛАТЕЖА ===
         if notification_type == 'card-incoming':
@@ -2175,54 +2166,90 @@ def send_notification_to_telegram(data):
         else:
             sub_type = notification_type
 
-        # === ФОРМИРУЕМ СООБЩЕНИЕ ===
+        # === ПАРСИМ МЕТКУ ДЛЯ ПОЛУЧЕНИЯ ТОВАРА И ПОКУПАТЕЛЯ (как при оплате звёздами) ===
+        product_id = "Неизвестно"
+        user_id = "Неизвестно"
+        phone = None
+        age = "Неизвестно"
+        price_stars = "Неизвестно"
+        country_flag = "🌍"
+        country_name = "Неизвестно"
+
+        if label and label.startswith('rub_'):
+            parts = label.split('_')
+            if len(parts) >= 3:
+                try:
+                    product_id = int(parts[1])
+                    user_id = int(parts[2])
+                except (ValueError, IndexError):
+                    pass
+
+                product = get_phone_product(product_id)
+                if product:
+                    pid, phone, price_rub, price_stars, age, session = product[:6]
+                    country_code = get_country_by_phone(phone)
+                    country = get_country_by_code(country_code) if country_code else None
+                    country_flag = country['flag'] if country else "🌍"
+                    country_name = country['name'] if country else "Неизвестно"
+
+        # === ЭКРАНИРУЕМ ДИНАМИЧЕСКИЕ ЗНАЧЕНИЯ ДЛЯ HTML (как при оплате звёздами) ===
+        safe_sender = html.escape(sender)
+        safe_datetime = html.escape(datetime_str)
+        safe_country_name = html.escape(str(country_name))
+        safe_hidden_phone = html.escape(str(phone)) if phone else "Неизвестно"
+
+        # === ФОРМИРУЕМ СООБЩЕНИЕ В HTML (как при оплате звёздами, но под рубли) ===
         if is_test:
             message = (
-                f"{emoji} *{type_text}*\n\n"
-                f"📌 Тип: {sub_type}\n"
+                f"🧪 <b>ТЕСТОВОЕ УВЕДОМЛЕНИЕ</b>\n\n"
+                f"📌 Тип: {html.escape(sub_type)}\n"
                 f"💰 Сумма: {amount} ₽\n"
-                f"🏦 Отправитель: `{sender}`\n"
-                f"🏷️ Метка: `{label}`\n"
-                f"🔢 ID: `{operation_id}`\n"
-                f"📅 Дата: {datetime_str}\n\n"
+                f"💵 Эквивалент: {price_stars} ⭐\n"
+                f"👤 Покупатель: <code>{user_id}</code>\n"
+                f"🆔 Отправитель: <code>{safe_sender}</code>\n"
+                f"🌍 Страна: {country_flag} {safe_country_name}\n"
+                f"📱 Номер: <code>{safe_hidden_phone}</code>\n"
+                f"📅 Возраст: {age} дней\n"
+                f"🏷️ Товар ID: <code>{product_id}</code>\n"
+                f"📅 Дата: {safe_datetime}\n\n"
                 f"⚠️ Это тестовое уведомление"
             )
         else:
             message = (
-                f"{emoji} *{type_text}*\n\n"
-                f"📌 Тип: {sub_type}\n"
+                f"💳 <b>ОПЛАТА РУБЛЯМИ</b>\n\n"
+                f"📌 Тип: {html.escape(sub_type)}\n"
                 f"💰 Сумма: {amount} ₽\n"
-                f"🏦 Отправитель: `{sender}`\n"
-                f"🏷️ Метка: `{label}`\n"
-                f"🔢 ID: `{operation_id}`\n"
-                f"📅 Дата: {datetime_str}\n\n"
+                f"💵 Эквивалент: {price_stars} ⭐\n"
+                f"👤 Покупатель: <code>{user_id}</code>\n"
+                f"🆔 Отправитель: <code>{safe_sender}</code>\n"
+                f"🌍 Страна: {country_flag} {safe_country_name}\n"
+                f"📱 Номер: <code>{safe_hidden_phone}</code>\n"
+                f"📅 Возраст: {age} дней\n"
+                f"🏷️ Товар ID: <code>{product_id}</code>\n"
+                f"📅 Дата: {safe_datetime}\n\n"
                 f"✅ Статус: ОПЛАЧЕНО"
             )
 
-        # === ОТПРАВЛЯЕМ АДМИНУ ===
-        response = requests.post(
-            url,
-            json={
-                "chat_id": ADMIN_CHAT_ID,
-                "text": message,
-                "parse_mode": "Markdown"
-            },
-            timeout=5
-        )
-        response = requests.post(
-            url,
-            json={
-                "chat_id": HELPER_ID,
-                "text": message,
-                "parse_mode": "Markdown"
-            },
-            timeout=5
-        )
+        # === ОТПРАВЛЯЕМ В ОБА ЧАТА И ПРОВЕРЯЕМ КАЖДЫЙ ОТВЕТ (как при оплате звёздами) ===
+        all_ok = True
+        for chat_id in (ADMIN_CHAT_ID, HELPER_ID):
+            response = requests.post(
+                url,
+                json={
+                    "chat_id": chat_id,
+                    "text": message,
+                    "parse_mode": "HTML"
+                },
+                timeout=5
+            )
+            if response.status_code != 200:
+                all_ok = False
+                logger.error(f"❌ Ошибка отправки в {chat_id}: {response.status_code} - {response.text}")
 
-        if response.status_code == 200:
-            logger.info(f"✅ Уведомление отправлено в Telegram")
+        if all_ok:
+            logger.info("✅ Уведомление отправлено в Telegram")
         else:
-            logger.error(f"❌ Ошибка отправки: {response.status_code}")
+            logger.error("❌ Ошибка отправки уведомления в Telegram")
 
     except Exception as e:
         logger.error(f"❌ Ошибка отправки уведомления: {e}")
