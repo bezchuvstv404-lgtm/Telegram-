@@ -1,2 +1,14 @@
 # === Конфигурация (секреты) ===
 config.py
+
+# === IDE ===
+.idea/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
