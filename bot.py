@@ -54,10 +54,7 @@ try:
         ADMIN_CHAT_ID,
         ADMINS,
         COUNTRIES, HELPER_ID,
-        LZT_URL,
-        LZT_LOGIN,
-        LZT_PASSWORD,
-        LZT_SECRET_ANSWER
+        LZT_API_TOKEN
     )
 
     print("✅ Конфигурация загружена из config.py")
@@ -2440,8 +2437,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 # LZT CONFIG
 # ---------------------------------------------------------------------------
-LZT_API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzUxMiJ9.eyJzdWIiOjEwODQwMjA3LCJpc3MiOiJsenQiLCJpYXQiOjE3ODY2MzM1ODYsImp0aSI6IjEwMDUwNzMiLCJzY29wZSI6ImJhc2ljIHJlYWQgcG9zdCBjb252ZXJzYXRlIHBheW1lbnQgaW52b2ljZSBjaGF0Ym94IG1hcmtldCIsImV4cCI6MTk0NDMxMzU4Nn0.S6Ywd95JQAzmm_TbTdqcowYL6qZSY7r6E0j89ZJiNmDl-nXLtJ1zCYtttmVMYdQH24Y6WiUAqC3NumgXqPkIFdeL0cvG93QVjYYhCOdHte7Mrr7qqMNpp37LvF5CGZKzeTyWfl5az5pAKVjSjtS-Lta46b-okwgbwFYB1Tuo3cQ"
-
 LZT_MAX_PRICE = 10
 LZT_SPAM_FILTER = "no"
 LZT_EXCLUDE_COUNTRIES = {"TH", "th", "Thailand", "thailand", "Таиланд"}
