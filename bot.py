@@ -55,7 +55,6 @@ try:
         ADMINS,
         COUNTRIES, HELPER_ID,
         LZT_API_TOKEN
-
     )
 
     print("✅ Конфигурация загружена из config.py")
@@ -979,7 +978,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Нет доступа!", reply_markup=back("start"))
         return
     buttons = [
-        [btn("🛒 КУПИТЬ НОМЕР (LZT)", "lzt_buy_number")],
+        [btn("🛒 КУПИТЬ НОМЕР (LZT)", "lzt_buy_menu")],
         [btn("📱 ДОБАВИТЬ НОМЕР", "add_phone")],
         [btn("✏️ ИЗМЕНИТЬ ЦЕНУ", "edit_price")]
     ]
@@ -2744,8 +2743,9 @@ def _lzt_fetch_account_data(market, item_id: int, retries: int = 3) -> Tuple[Dic
     return {}, {}
 
 
-def _lzt_buy_single_account(market) -> Tuple[bool, Optional[int], Optional[str], Optional[Dict[str, Any]], Optional[str], Optional[float]]:
-    """Покупает один аккаунт. Возвращает (success, item_id, phone, login_data, country, price)."""
+def _lzt_buy_single_account(market, target_country: Optional[str] = None) -> Tuple[bool, Optional[int], Optional[str], Optional[Dict[str, Any]], Optional[str], Optional[float]]:
+    """Покупает один аккаунт. Возвращает (success, item_id, phone, login_data, country, price).
+    Если target_country задан — ищет ТОЛЬКО эту страну."""
     logger.info("[SEARCH] Ищу один подходящий аккаунт...")
     query = (
         f"/telegram?"
@@ -2772,7 +2772,21 @@ def _lzt_buy_single_account(market) -> Tuple[bool, Optional[int], Optional[str],
         logger.info("[SEARCH] Лотов не найдено.")
         return False, None, None, None, None, None
 
-    logger.info(f"[SEARCH] Найдено {len(items)} лотов...")
+    # Фильтруем по стране, если задана
+    if target_country:
+        filtered = []
+        for item in items:
+            c = _lzt_get_country(item)
+            if c and target_country.lower() in c.lower():
+                filtered.append(item)
+        if not filtered:
+            logger.info(f"[SEARCH] Нет лотов для страны: {target_country}")
+            return False, None, None, None, target_country, None
+        items = filtered
+        logger.info(f"[SEARCH] Найдено {len(items)} лотов для страны {target_country}...")
+    else:
+        logger.info(f"[SEARCH] Найдено {len(items)} лотов (любая страна)...")
+
     balance, balance_id = _lzt_fetch_balance_and_account_id(market)
     if balance is not None:
         logger.info(f"[BALANCE] Доступно: {balance:.2f} ₽ (balance_id: {balance_id})")
@@ -2832,8 +2846,30 @@ def _lzt_buy_single_account(market) -> Tuple[bool, Optional[int], Optional[str],
     return False, None, None, None, None, None
 
 
-# ===== Обработчик кнопки "КУПИТЬ НОМЕР (LZT)" =====
-async def lzt_buy_number_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ===== МЕНЮ ВЫБОРА ПОКУПКИ LZT =====
+async def lzt_buy_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
+        return
+
+    rows = [
+        [btn("🎲 РАНДОМНЫЙ НОМЕР", "lzt_buy_random")],
+        [btn("🌍 ВЫБРАТЬ СТРАНУ", "lzt_buy_country")],
+        [btn("🔙 НАЗАД", "admin_panel")]
+    ]
+    await query.edit_message_text(
+        "🛒 *ПОКУПКА НОМЕРА НА LZT MARKET*\n\n"
+        "Выберите режим покупки:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
+
+
+async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Покупка рандомного номера (любая страна)."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -2845,13 +2881,12 @@ async def lzt_buy_number_callback(update: Update, context: ContextTypes.DEFAULT_
         return
 
     await query.edit_message_text(
-        "⏳ *ИДЁТ ПОКУПКА НОМЕРА ЧЕРЕЗ LZT API...*\n\n"
+        "⏳ *ИДЁТ ПОКУПКА РАНДОМНОГО НОМЕРА...*\n\n"
         "Это может занять некоторое время. Ожидайте.",
         parse_mode="Markdown"
     )
 
     def run_purchase():
-        # Защита от "no current event loop" в потоке executor'а
         try:
             asyncio.get_event_loop()
         except RuntimeError:
@@ -2859,7 +2894,7 @@ async def lzt_buy_number_callback(update: Update, context: ContextTypes.DEFAULT_
         market = _lzt_market_cls(token=LZT_API_TOKEN)
         if LZT_PROXY:
             market.settings.proxy = LZT_PROXY
-        return _lzt_buy_single_account(market)
+        return _lzt_buy_single_account(market, target_country=None)
 
     try:
         loop = asyncio.get_running_loop()
@@ -2904,6 +2939,120 @@ async def lzt_buy_number_callback(update: Update, context: ContextTypes.DEFAULT_
         )
 
 
+async def lzt_buy_country_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать список стран для выбора."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
+        return
+
+    rows = []
+    for country in COUNTRIES:
+        rows.append([btn(f"{country['flag']} {country['name']}", f"lzt_country_{country['code']}")])
+    rows.append([btn("🔙 НАЗАД", "lzt_buy_menu")])
+
+    await query.edit_message_text(
+        "🌍 *ВЫБЕРИТЕ СТРАНУ ДЛЯ ПОКУПКИ*\n\n"
+        "Бот купит номер ТОЛЬКО выбранной страны.\n"
+        "Если лотов нет — сообщит об этом.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
+
+
+async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Покупка номера конкретной страны."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
+        return
+    if not _lzt_available:
+        await query.edit_message_text("❌ LZT Market API недоступен. Установите: pip install LOLZTEAM", reply_markup=back("admin_panel"))
+        return
+
+    country_code = query.data.replace("lzt_country_", "")
+    country_info = get_country_by_code(country_code)
+    country_name = country_info['name'] if country_info else country_code
+    country_flag = country_info['flag'] if country_info else "🌍"
+
+    await query.edit_message_text(
+        f"⏳ *ИЩУ НОМЕР: {country_flag} {country_name}...*\n\n"
+        f"Проверяю наличие лотов на LZT Market.",
+        parse_mode="Markdown"
+    )
+
+    def run_purchase():
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+        market = _lzt_market_cls(token=LZT_API_TOKEN)
+        if LZT_PROXY:
+            market.settings.proxy = LZT_PROXY
+        return _lzt_buy_single_account(market, target_country=country_code)
+
+    try:
+        loop = asyncio.get_running_loop()
+        success, item_id, phone, login_data, country, price = await loop.run_in_executor(None, run_purchase)
+
+        # Проверяем: лотов вообще не было для этой страны
+        if not success and country and not item_id and price is None:
+            await query.edit_message_text(
+                f"⚠️ *НЕТ ЛОТОВ: {country_flag} {country_name}*\n\n"
+                f"На LZT Market сейчас нет доступных номеров для этой страны.\n"
+                f"Попробуйте позже или выберите другую страну.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [btn("🔄 ДРУГАЯ СТРАНА", "lzt_buy_country")],
+                    [btn("🎲 РАНДОМ", "lzt_buy_random")],
+                    [btn("🔙 НАЗАД", "admin_panel")]
+                ])
+            )
+            return
+
+        if success and item_id:
+            lzt_purchases[user_id] = {
+                "item_id": item_id,
+                "phone": phone,
+                "login_data": login_data,
+                "country": country,
+                "price": price
+            }
+            phone_display = phone if phone else "Неизвестен"
+            await query.edit_message_text(
+                f"✅ *НОМЕР УСПЕШНО КУПЛЕН!*\n\n"
+                f"🌍 Страна: {country or 'N/A'}\n"
+                f"📱 Номер: `{phone_display}`\n"
+                f"💰 Цена: {price:.2f} ₽\n\n"
+                f"Нажмите кнопку ниже, чтобы получить код подтверждения.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [btn("🔑 ПОЛУЧИТЬ КОД", "lzt_get_code")],
+                    [btn("🔙 НАЗАД", "admin_panel")]
+                ])
+            )
+        else:
+            await query.edit_message_text(
+                "❌ *НЕ УДАЛОСЬ КУПИТЬ НОМЕР.*\n"
+                "Возможные причины:\n"
+                "• Недостаточно средств\n"
+                "• Ошибка API",
+                parse_mode="Markdown",
+                reply_markup=back("admin_panel")
+            )
+    except Exception as e:
+        logger.error(f"❌ Ошибка LZT покупки: {e}")
+        await query.edit_message_text(
+            f"❌ *ОШИБКА ПРИ ПОКУПКЕ:*\n`{str(e)[:200]}`",
+            parse_mode="Markdown",
+            reply_markup=back("admin_panel")
+        )
+
+
 # ===== Обработчик кнопки "ПОЛУЧИТЬ КОД" =====
 async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2926,7 +3075,6 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
     phone = lzt_purchases[user_id].get("phone", "Неизвестен")
 
     def run_get_code():
-        # Защита от "no current event loop" в потоке executor'а
         try:
             asyncio.get_event_loop()
         except RuntimeError:
@@ -3054,7 +3202,10 @@ async def run_app():
     app.add_handler(CallbackQueryHandler(remove_admin_confirm, pattern="^remove_admin_\d+$"))
     app.add_handler(CallbackQueryHandler(list_admins, pattern="^list_admins$"))
 
-    app.add_handler(CallbackQueryHandler(lzt_buy_number_callback, pattern="^lzt_buy_number$"))
+    app.add_handler(CallbackQueryHandler(lzt_buy_menu_callback, pattern="^lzt_buy_menu$"))
+    app.add_handler(CallbackQueryHandler(lzt_buy_random_callback, pattern="^lzt_buy_random$"))
+    app.add_handler(CallbackQueryHandler(lzt_buy_country_callback, pattern="^lzt_buy_country$"))
+    app.add_handler(CallbackQueryHandler(lzt_buy_country_select_callback, pattern="^lzt_country_"))
     app.add_handler(CallbackQueryHandler(lzt_get_code_callback, pattern="^lzt_get_code$"))
 
     app.add_handler(CallbackQueryHandler(shop, pattern="^shop$"))
