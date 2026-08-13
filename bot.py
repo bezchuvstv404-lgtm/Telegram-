@@ -55,6 +55,7 @@ try:
         ADMINS,
         COUNTRIES, HELPER_ID,
         LZT_API_TOKEN
+
     )
 
     print("✅ Конфигурация загружена из config.py")
@@ -2850,6 +2851,11 @@ async def lzt_buy_number_callback(update: Update, context: ContextTypes.DEFAULT_
     )
 
     def run_purchase():
+        # Защита от "no current event loop" в потоке executor'а
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
         market = _lzt_market_cls(token=LZT_API_TOKEN)
         if LZT_PROXY:
             market.settings.proxy = LZT_PROXY
@@ -2920,6 +2926,11 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
     phone = lzt_purchases[user_id].get("phone", "Неизвестен")
 
     def run_get_code():
+        # Защита от "no current event loop" в потоке executor'а
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
         market = _lzt_market_cls(token=LZT_API_TOKEN)
         if LZT_PROXY:
             market.settings.proxy = LZT_PROXY
