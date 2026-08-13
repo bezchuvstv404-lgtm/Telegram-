@@ -11,8 +11,9 @@ import aiohttp
 import requests
 import time
 import html
+import json
+from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
-from time import sleep
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 from telegram.ext import (
@@ -27,15 +28,8 @@ from telegram.ext import (
 )
 from telethon import TelegramClient, errors
 from telethon.sessions import StringSession
-from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.functions.auth import ResetAuthorizationsRequest
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 
 # ==========================================
 # ИМПОРТ ЛИЧНЫХ ДАННЫХ ИЗ CONFIG.PY
@@ -57,11 +51,9 @@ try:
         CHANNEL_ID,
         ADMIN_CHAT_ID,
         ADMINS,
-        COUNTRIES, HELPER_ID,
-        LZT_URL,
-        LZT_LOGIN,
-        LZT_PASSWORD,
-        LZT_SECRET_ANSWER
+        COUNTRIES,
+        HELPER_ID,
+        LZT_API_TOKEN,
     )
 
     print("✅ Конфигурация загружена из config.py")
@@ -114,11 +106,9 @@ CALLBACK_REJECT = "reject_offer"
 # ==========================================
 clients = {}
 accounts = {}
-paid_sessions = {}
 awaiting_phone_confirmation = {}
 pending_rub = {}
 subscriptions = {}
-telethon_clients_cache = {}
 clients_lock = asyncio.Lock()
 accounts_lock = asyncio.Lock()
 
@@ -127,7 +117,6 @@ accounts_lock = asyncio.Lock()
 # ==========================================
 # Хранилище драйверов: admin_id -> driver
 # Драйвер создаётся при покупке номера и остаётся живым для получения кода
-lzt_drivers = {}
 
 
 # ==========================================
@@ -407,12 +396,6 @@ def back(cb="start"):
     return InlineKeyboardMarkup([[btn("🔙 НАЗАД", cb)]])
 
 
-def hide_phone(phone):
-    if len(phone) > 6:
-        return f"{phone[:4]}****{phone[-4:]}"
-    return phone
-
-
 def validate_phone(phone):
     return bool(re.match(r'^\+\d{10,15}$', phone))
 
@@ -439,25 +422,6 @@ async def check_user_subscription(user_id):
         return False
     except Exception as e:
         logger.error(f"❌ Ошибка проверки подписки: {e}")
-        return False
-
-
-async def check_yoomoney_payment_async(label):
-    """Проверка оплаты через ЮMoney (заглушка)"""
-    try:
-        url = f"https://yoomoney.ru/api/operation-history?label={label}&records=1"
-        timeout = aiohttp.ClientTimeout(total=5)
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=timeout) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    operations = data.get('operations', [])
-                    if operations:
-                        for op in operations:
-                            if op.get('status') == 'success':
-                                return True
-        return False
-    except Exception as e:
         return False
 
 
@@ -838,10 +802,6 @@ async def reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[btn("Предложение", CALLBACK_OFFER)]])
-
-
 def offer_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -863,23 +823,6 @@ async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=offer_menu_keyboard(),
     )
     return ConversationHandler.END
-
-
-async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    rows = [
-        [btn("🛒 МАГАЗИН", "shop")],
-        [btn("📦 МОИ ПОКУПКИ", "my_purchases")],
-        [btn("⭐ ОТЗЫВЫ", "reviews")],
-        [btn("💡 ПРЕДЛОЖКА", "offer")],
-        [btn("🆘 ПОДДЕРЖКА", "support")]
-    ]
-    if is_admin(user_id):
-        rows.append([btn("👥 АДМИН-ПАНЕЛЬ", "admin_panel")])
-    text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
-    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def make_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2438,266 +2381,405 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуйте позже.")
         except:
             pass
-
 # =====================================================================
-# LZT MARKET (SELENIUM) — ПОКУПКА НОМЕРА
+# LZT MARKET (API) — ПОКУПКА НОМЕРА
 # =====================================================================
 
-def lzt_create_driver():
-    options = webdriver.ChromeOptions()
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-    return webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options,
-    )
+# ---------------------------------------------------------------------------
+# LZT CONFIG
+# ---------------------------------------------------------------------------
+LZT_MAX_PRICE = 10
+LZT_SPAM_FILTER = "no"
+LZT_EXCLUDE_COUNTRIES = {"TH", "th", "Thailand", "thailand", "Таиланд"}
+LZT_ORDER_BY = "price_to_up"
+LZT_PROXY = None
+
+# Включить подробное логирование ответов API для отладки
+LZT_DEBUG_RAW = True
+# ---------------------------------------------------------------------------
+
+# Хранилище активных LZT-покупок: user_id -> {"item_id": int, "phone": str, "login_data": dict, "country": str}
+lzt_purchases = {}
+
+try:
+    from LOLZTEAM.Client import Market
+    _lzt_market_cls = Market
+    _lzt_available = True
+except ImportError:
+    _lzt_available = False
+    logger.error("[!] pip install LOLZTEAM не установлен. LZT Market API недоступен.")
 
 
-def lzt_open_site_and_login(driver):
-    """Открывает LZT Market, обходит капчу и входит в аккаунт."""
-    driver.get(LZT_URL)
-    sleep(5)
-
-    # Обходим капчу на главной странице
+def _lzt_log_raw(label: str, resp) -> None:
+    if not LZT_DEBUG_RAW:
+        return
     try:
-        captcha_check = WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Проверка безопасности')]"))
-        )
-        logger.info("Обнаружена капча 'Проверка безопасности'! Нажимаем чекбокс...")
+        text = resp.text[:2000] if hasattr(resp, 'text') else str(resp)[:2000]
+        logger.debug(f"[RAW-{label}] Status: {getattr(resp, 'status_code', 'N/A')} | Body: {text}")
+    except Exception:
+        pass
 
-        captcha_checkbox = None
-        selectors = [
-            "input[type='checkbox'][id*='captcha_checkbox']",
-            "input[type='checkbox']",
-            "iframe[src*='captcha']",
-        ]
-        for selector in selectors:
+
+def _lzt_get_item_id(item: Dict[str, Any]) -> Optional[int]:
+    for key in ("item_id", "id"):
+        val = item.get(key)
+        if val is not None:
+            return int(val)
+    return None
+
+
+def _lzt_get_price(item: Dict[str, Any]) -> float:
+    price = item.get("price")
+    if price is not None:
+        return float(price)
+    return 0.0
+
+
+def _lzt_get_seller_fee_price(item: Dict[str, Any]) -> float:
+    p = item.get("priceWithSellerFee")
+    if p is not None:
+        return float(p)
+    return _lzt_get_price(item) * 1.03
+
+
+def _lzt_get_country(item: Dict[str, Any]) -> str:
+    val = item.get("telegram_country") or item.get("country") or item.get("telegramCountry")
+    if val:
+        return str(val)
+    return ""
+
+
+def _lzt_get_title(item: Dict[str, Any]) -> str:
+    val = item.get("title")
+    if val:
+        return str(val)
+    return "N/A"
+
+
+def _lzt_get_description(item: Dict[str, Any]) -> str:
+    val = item.get("description") or item.get("desc") or item.get("body")
+    if val:
+        return str(val)
+    return ""
+
+
+def _lzt_is_thailand(country: str) -> bool:
+    if not country:
+        return False
+    c = country.strip()
+    return c in LZT_EXCLUDE_COUNTRIES or c.lower() in {e.lower() for e in LZT_EXCLUDE_COUNTRIES}
+
+
+def _lzt_fetch_balance_and_account_id(market) -> Tuple[Optional[float], Optional[int]]:
+    try:
+        resp = market.request("GET", "/balance/exchange")
+        _lzt_log_raw("BALANCE", resp)
+        data = resp.json()
+        to_data = data.get("to", {})
+        total = 0.0
+        account_balance_id = None
+        for key, val in to_data.items():
+            if isinstance(val, dict):
+                bal_type = val.get("type")
+                bal_str = val.get("balance")
+                if bal_type == "account" and bal_str is not None:
+                    try:
+                        total += float(bal_str)
+                        account_balance_id = val.get("balance_id")
+                    except (ValueError, TypeError):
+                        pass
+                elif bal_type == "balance" and bal_str is not None:
+                    try:
+                        total += float(bal_str)
+                        if account_balance_id is None:
+                            account_balance_id = val.get("balance_id")
+                    except (ValueError, TypeError):
+                        pass
+        return (total if total > 0 else None), account_balance_id
+    except Exception as e:
+        logger.warning(f"[BALANCE] Ошибка: {e}")
+        return None, None
+
+
+def _lzt_deep_find(data: Any, target_keys: tuple, max_depth: int = 10) -> list:
+    found = []
+    if max_depth <= 0:
+        return found
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if k.lower() in [tk.lower() for tk in target_keys]:
+                if v is not None:
+                    found.append(v)
+            if isinstance(v, (dict, list)):
+                found.extend(_lzt_deep_find(v, target_keys, max_depth - 1))
+    elif isinstance(data, list):
+        for item in data:
+            found.extend(_lzt_deep_find(item, target_keys, max_depth - 1))
+    return found
+
+
+def _lzt_extract_login_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    result = {}
+    root = data
+    for wrapper in ("data", "item", "account", "response"):
+        if wrapper in data and isinstance(data[wrapper], dict):
+            root = data[wrapper]
+            break
+    priority_keys = (
+        "loginData", "login_data", "login", "password", "pass",
+        "session", "session_file", "json", "json_data", "jsonData",
+        "phone", "phone_number", "number", "tel", "telegram_phone",
+        "code", "email_code", "sms_code", "otp",
+        "email", "email_password", "email_pass",
+        "username", "user", "url", "link",
+        "data", "account_data", "raw_data",
+        "secret", "auth_key", "app_id", "api_id", "api_hash",
+        "tg_session", "telethon_session", "pyrogram_session",
+        "tdata", "tdata_path", "backup", "archive"
+    )
+    for key in priority_keys:
+        if key in root and root[key] is not None:
+            result[key] = root[key]
+    login_data_candidates = _lzt_deep_find(root, ("loginData", "login_data", "login_data"))
+    for candidate in login_data_candidates:
+        if isinstance(candidate, dict):
+            for k, v in candidate.items():
+                if k not in result and v is not None:
+                    result[k] = v
+        elif isinstance(candidate, str):
             try:
-                captcha_checkbox = WebDriverWait(driver, 5).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                )
-                logger.info(f"Чекбокс найден по: {selector}")
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    for k, v in parsed.items():
+                        if k not in result and v is not None:
+                            result[k] = v
+            except json.JSONDecodeError:
+                result["raw_loginData_string"] = candidate
+    for ld_key in ("loginData", "login_data"):
+        if ld_key in result and isinstance(result[ld_key], str):
+            try:
+                parsed = json.loads(result[ld_key])
+                if isinstance(parsed, dict):
+                    for k, v in parsed.items():
+                        if k not in result and v is not None:
+                            result[k] = v
+            except json.JSONDecodeError:
+                result["raw_session_string"] = result[ld_key]
+    for raw_key in ("data", "raw", "response", "body"):
+        raw = root.get(raw_key)
+        if isinstance(raw, str) and len(raw) > 20:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    for k, v in parsed.items():
+                        if k not in result and v is not None:
+                            result[k] = v
+            except json.JSONDecodeError:
+                result["raw_text"] = raw
+    for target, keys in {
+        "phone_deep": ("phone", "phone_number", "number", "tel", "telegram_phone"),
+        "session_deep": ("session", "tg_session", "telethon_session", "pyrogram_session"),
+        "password_deep": ("password", "pass", "email_password", "email_pass"),
+    }.items():
+        vals = _lzt_deep_find(root, keys)
+        for v in vals:
+            if v and str(v).strip():
+                result[target] = v
                 break
-            except Exception:
-                continue
-
-        if captcha_checkbox is not None:
-            driver.execute_script("arguments[0].click();", captcha_checkbox)
-            logger.info("Чекбокс капчи нажат")
-            sleep(5)
-    except Exception:
-        pass
-
-    # Вход в аккаунт
-    login_button = WebDriverWait(driver, 20).until(
-        EC.element_to_be_clickable((By.CSS_SELECTOR, "a.login-and-signup-btn"))
-    )
-    logger.info("Кнопка 'Войти' найдена и нажата")
-    login_button.click()
-
-    sleep(5)
-
-    login_field = WebDriverWait(driver, 10).until(
-        EC.presence_of_element_located((By.ID, "ctrl_pageLogin_login"))
-    )
-    login_field.clear()
-    login_field.send_keys(LZT_LOGIN)
-
-    password_field = WebDriverWait(driver, 10).until(
-        EC.presence_of_element_located((By.ID, "ctrl_pageLogin_password"))
-    )
-    password_field.clear()
-    password_field.send_keys(LZT_PASSWORD)
-
-    login_submit = WebDriverWait(driver, 10).until(
-        EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='submit']"))
-    )
-    login_submit.click()
-    logger.info("Кнопка входа нажата")
-
-    sleep(5)
+    return result
 
 
-def lzt_buy_number(user_id):
-    """Покупает номер на LZT Market. Возвращает номер телефона."""
-    driver = lzt_create_driver()
-    lzt_drivers[user_id] = driver  # сохраняем драйвер для получения кода
-    number = None
-
-    try:
-        # Открываем сайт и входим
-        lzt_open_site_and_login(driver)
-
-        # Нажимаем кнопку фильтра
-        history_button = driver.find_element(By.CSS_SELECTOR, "a.searchHistoryItemClicker")
-        driver.execute_script("arguments[0].click();", history_button)
-        logger.info("Кнопка фильтра нажата")
-
-        sleep(5)
-
-        # Цикл покупки
-        while True:
-            pay_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "a.buyButton"))
-            )
-            logger.info("Кнопка 'Купить' найдена и нажата")
-            driver.execute_script("arguments[0].click();", pay_button)
-
-            # Проверяем капчу после нажатия "Купить"
-            try:
-                captcha_check = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.XPATH, "//*[contains(text(), '🤖🛡️ Проверка безопасности')]"))
-                )
-                logger.info("Обнаружена капча '🤖🛡️ Проверка безопасности'! Нажимаем чекбокс...")
-
-                captcha_checkbox = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='checkbox'][id*='captcha_checkbox']"))
-                )
-                driver.execute_script("arguments[0].click();", captcha_checkbox)
-                logger.info("Чекбокс капчи нажат")
-                sleep(5)
-            except Exception:
-                pass
-
-            # Проверяем "Проверка безопасности"
-            try:
-                security_check = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.XPATH, "//*[contains(text(), 'Проверка безопасности')]"))
-                )
-                logger.info("Обнаружена 'Проверка безопасности'!")
-
-                secret_field = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.NAME, "secret_answer"))
-                )
-                secret_field.clear()
-                secret_field.send_keys(LZT_SECRET_ANSWER)
-                logger.info(f"Ответ на секретный вопрос введён: {LZT_SECRET_ANSWER}")
-
-                confirm_button = WebDriverWait(driver, 5).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, "input[type='submit'][value='Подтвердить']"))
-                )
-                confirm_button.click()
-                logger.info("Кнопка 'Подтвердить' нажата")
-
-                logger.info("Ждём 10 секунд...")
-                sleep(10)
-
-                # Исход: появилась кнопка "Подтвердить покупку" — успех!
-                try:
-                    order_confirm_button = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable(
-                            (By.CSS_SELECTOR, "input[type='submit'][value='Подтвердить покупку']"))
-                    )
-                    logger.info("Кнопка 'Подтвердить покупку' найдена! Нажимаем её...")
-                    driver.execute_script("arguments[0].click();", order_confirm_button)
-                    logger.info("Кнопка 'Подтвердить покупку' нажата — покупка успешна!")
-                    break
-                except Exception:
-                    pass
-
-                # Исход: сообщение "Произошла ошибка" — начинаем заново
-                try:
-                    error_message = driver.find_element(By.XPATH, "//*[contains(text(), 'Произошла ошибка:')]")
-                    logger.info("Обнаружено сообщение 'Произошла ошибка'. Пробуем следующую кнопку...")
-                    driver.refresh()
-                    sleep(5)
-                    continue
-                except Exception:
-                    pass
-
-                logger.info("Ни один из исходов не обнаружен. Обновляем страницу и пробуем снова...")
-                driver.refresh()
-                sleep(5)
-                continue
-
-            except Exception:
-                logger.info("'Проверка безопасности' не обнаружена.")
-                continue
-
-        # Читаем номер аккаунта
-        try:
-            login_data_element = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "loginData--login"))
-            )
-            number = login_data_element.text.strip()
-            logger.info(f"Номер аккаунта: +{number}")
-        except Exception as e:
-            logger.error(f"Поле loginData--login не найдено: {e}")
-
-    except Exception as e:
-        logger.error(f"Ошибка при покупке: {e}")
-        # При ошибке закрываем драйвер
-        try:
-            driver.quit()
-        except Exception:
-            pass
-        lzt_drivers.pop(user_id, None)
-
-    # НЕ закрываем драйвер при успехе — он нужен для получения кода
-    return number
-
-
-def lzt_get_code(user_id):
-    """Получает код с LZT Market, используя сохранённый драйвер."""
-    driver = lzt_drivers.get(user_id)
-    if driver is None:
-        logger.error(f"Драйвер не найден для user_id: {user_id}")
+def _lzt_extract_phone_from_text(text: str) -> Optional[str]:
+    if not text:
         return None
+    patterns = [
+        r'(\+\d[\d\s\-]{7,20})',
+        r'(\d{11,13})',
+    ]
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            phone = re.sub(r'[\s\-]', '', m.group(1))
+            if len(phone) >= 10:
+                return phone
+    return None
 
-    code = None
 
-    try:
-        # Нажимаем кнопку "Получить код"
-        get_code_button_el = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href*='telegram-login-code']"))
-        )
-        logger.info("Кнопка 'Получить код' найдена! Нажимаем её...")
-        driver.execute_script("arguments[0].click();", get_code_button_el)
-        logger.info("Кнопка 'Получить код' нажата")
-
-        sleep(5)
-
-        # Ищем поле с кодом
-        try:
-            code_input = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "confirmationCode"))
-            )
-            code = code_input.get_attribute("value").strip()
-            logger.info(f"Код найден в поле confirmationCode: {code}")
-        except Exception as e:
-            logger.error(f"Поле confirmationCode не найдено: {e}")
-
-        # Если код не найден — ищем все input с value
-        if not code:
+def _lzt_extract_phone(login_data: Dict[str, Any], item: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    for key in ("phone", "phone_number", "number", "tel", "telegram_phone"):
+        val = login_data.get(key)
+        if val:
+            return str(val).strip()
+    for key in ("json", "json_data", "jsonData", "data", "loginData", "login_data"):
+        val = login_data.get(key)
+        if isinstance(val, dict):
+            for sub in ("phone", "phone_number", "number", "tel", "telegram_phone"):
+                if sub in val and val[sub]:
+                    return str(val[sub]).strip()
+        elif isinstance(val, str):
             try:
-                inputs = driver.find_elements(By.CSS_SELECTOR, "input[value]")
-                for inp in inputs:
-                    val = inp.get_attribute("value")
-                    if val and len(val.strip()) > 0:
-                        code = val.strip()
-                        logger.info(f"Код найден в input: {code}")
-                        break
-            except Exception:
+                parsed = json.loads(val)
+                if isinstance(parsed, dict):
+                    for sub in ("phone", "phone_number", "number", "tel", "telegram_phone"):
+                        if sub in parsed and parsed[sub]:
+                            return str(parsed[sub]).strip()
+            except json.JSONDecodeError:
                 pass
+    session = login_data.get("session") or login_data.get("tg_session") or login_data.get("raw_session_string") or login_data.get("telethon_session") or login_data.get("pyrogram_session")
+    if isinstance(session, str):
+        m = re.search(r'(\+\d{7,15})', session)
+        if m:
+            return m.group(1)
+    if item:
+        for field in (_lzt_get_title(item), _lzt_get_description(item)):
+            phone = _lzt_extract_phone_from_text(field)
+            if phone:
+                logger.info(f"[PHONE] Найден номер в {'title' if field == _lzt_get_title(item) else 'description'}: {phone}")
+                return phone
+    vals = _lzt_deep_find(login_data, ("phone", "phone_number", "number", "tel", "telegram_phone"))
+    for v in vals:
+        if v and str(v).strip():
+            return str(v).strip()
+    return None
 
-    except Exception as e:
-        logger.error(f"Ошибка при получении кода: {e}")
 
-    # Закрываем драйвер и убираем из словаря
+def _lzt_fetch_verification_code(market, item_id: int) -> Optional[str]:
+    endpoint = f"/{item_id}/telegram-login-code"
     try:
-        driver.quit()
-    except Exception:
-        pass
-    lzt_drivers.pop(user_id, None)
+        logger.info(f"[CODE] Запрашиваю код через {endpoint} ...")
+        resp = market.request("GET", endpoint)
+        _lzt_log_raw("CODE", resp)
+        if resp.status_code == 200:
+            data = resp.json()
+            logger.info(f"[CODE] Ответ API: {json.dumps(data, ensure_ascii=False, indent=2)[:500]}")
+            for key in ("code", "email_code", "sms_code", "otp", "message", "data", "text", "telegram_code", "login_code"):
+                val = data.get(key)
+                if val is not None and str(val).strip():
+                    code = str(val).strip()
+                    logger.info(f"[CODE] Найден код в поле '{key}': {code}")
+                    return code
+            vals = _lzt_deep_find(data, ("code", "email_code", "sms_code", "otp", "telegram_code", "login_code"))
+            for v in vals:
+                if v and str(v).strip():
+                    return str(v).strip()
+            if isinstance(data, str) and data.strip():
+                return data.strip()
+        elif resp.status_code == 429:
+            logger.warning("[CODE] Слишком часто, подожду 5 сек...")
+            time.sleep(5)
+        else:
+            logger.warning(f"[CODE] HTTP {resp.status_code}: {resp.text[:300]}")
+    except Exception as e:
+        logger.error(f"[CODE] Ошибка запроса кода: {e}")
+    return None
 
-    return code
+
+def _lzt_fetch_account_data(market, item_id: int, retries: int = 3) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    for attempt in range(1, retries + 1):
+        try:
+            logger.info(f"[DATA] Получаю данные для входа (попытка {attempt}/{retries})...")
+            resp = market.request("GET", f"/{item_id}")
+            _lzt_log_raw("ACCOUNT_DATA", resp)
+            data = resp.json()
+            logger.info(f"[DATA] Сырой ответ: {json.dumps(data, ensure_ascii=False, indent=2)[:800]}")
+            login_data = _lzt_extract_login_data(data)
+            if not login_data and attempt < retries:
+                time.sleep(2)
+                continue
+            return login_data, data
+        except Exception as e:
+            logger.warning(f"[DATA] Ошибка: {e}")
+            if attempt < retries:
+                time.sleep(2)
+    return {}, {}
+
+
+def _lzt_buy_single_account(market) -> Tuple[bool, Optional[int], Optional[str], Optional[Dict[str, Any]], Optional[str], Optional[float]]:
+    """Покупает один аккаунт. Возвращает (success, item_id, phone, login_data, country, price)."""
+    logger.info("[SEARCH] Ищу один подходящий аккаунт...")
+    query = (
+        f"/telegram?"
+        f"pmax={LZT_MAX_PRICE}"
+        f"&spam={LZT_SPAM_FILTER}"
+        f"&order_by={LZT_ORDER_BY}"
+        f"&page=1"
+        f"&show=true"
+    )
+    try:
+        response = market.request("GET", query)
+        _lzt_log_raw("SEARCH", response)
+        data = response.json()
+    except Exception as e:
+        logger.error(f"[SEARCH] Ошибка поиска: {e}")
+        return False, None, None, None, None, None
+
+    items = data.get("items", [])
+    if not items:
+        items = data.get("accounts", [])
+    if not items and isinstance(data, list):
+        items = data
+    if not items:
+        logger.info("[SEARCH] Лотов не найдено.")
+        return False, None, None, None, None, None
+
+    logger.info(f"[SEARCH] Найдено {len(items)} лотов...")
+    balance, balance_id = _lzt_fetch_balance_and_account_id(market)
+    if balance is not None:
+        logger.info(f"[BALANCE] Доступно: {balance:.2f} ₽ (balance_id: {balance_id})")
+
+    for item in items:
+        item_id = _lzt_get_item_id(item)
+        if item_id is None:
+            continue
+        price = _lzt_get_price(item)
+        price_total = _lzt_get_seller_fee_price(item)
+        country = _lzt_get_country(item)
+        title = _lzt_get_title(item)
+        if price > LZT_MAX_PRICE:
+            continue
+        if _lzt_is_thailand(country):
+            logger.info(f"[SKIP] ID:{item_id} — Таиланд ({country})")
+            continue
+        if balance is not None and balance < price_total:
+            logger.warning(f"[SKIP] ID:{item_id} — недостаточно средств (нужно ~{price_total:.2f} ₽, есть {balance:.2f} ₽)")
+            continue
+
+        logger.info(f"[BUY] ID:{item_id} | {price}₽ (итого ~{price_total:.2f}₽) | Country:{country or 'N/A'} | {title[:60]}")
+        payload: Dict[str, Any] = {"price": price}
+        if balance_id is not None:
+            payload["balance_id"] = balance_id
+        try:
+            buy_resp = market.request("POST", f"/{item_id}/fast-buy", json=payload)
+            _lzt_log_raw("FAST_BUY", buy_resp)
+            try:
+                buy_data = buy_resp.json()
+            except Exception:
+                buy_data = {"raw": buy_resp.text}
+            logger.info(f"[BUY] Ответ fast-buy: {json.dumps(buy_data, ensure_ascii=False, indent=2)[:800]}")
+            if buy_resp.status_code in (200, 201):
+                logger.info(f"  ✅ УСПЕХ | Куплен лот {item_id}")
+                login_data = _lzt_extract_login_data(buy_data)
+                raw_item = {}
+                if not login_data:
+                    logger.info("[DATA] Данные не найдены в ответе покупки, запрашиваю отдельно...")
+                    time.sleep(1)
+                    login_data, raw_item = _lzt_fetch_account_data(market, item_id)
+                else:
+                    logger.info("[DATA] Данные найдены прямо в ответе покупки!")
+                phone = _lzt_extract_phone(login_data, item)
+                if not phone and raw_item:
+                    phone = _lzt_extract_phone_from_text(str(raw_item))
+                return True, item_id, phone, login_data, country, price
+            else:
+                err_text = json.dumps(buy_data, ensure_ascii=False)[:400]
+                logger.error(f"  ❌ ОШИБКА | HTTP {buy_resp.status_code} | {err_text}")
+                continue
+        except Exception as e:
+            logger.error(f"  ❌ ОШИБКА покупки ID:{item_id}: {e}")
+            continue
+
+    logger.info("[RESULT] Подходящих лотов не найдено.")
+    return False, None, None, None, None, None
 
 
 # ===== Обработчик кнопки "КУПИТЬ НОМЕР (LZT)" =====
@@ -2705,46 +2787,65 @@ async def lzt_buy_number_callback(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-
     if not is_admin(user_id):
         await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
         return
+    if not _lzt_available:
+        await query.edit_message_text("❌ LZT Market API недоступен. Установите: pip install LOLZTEAM", reply_markup=back("admin_panel"))
+        return
 
     await query.edit_message_text(
-        "⏳ *ИДЁТ ПОКУПКА НОМЕРА...*\n\n"
+        "⏳ *ИДЁТ ПОКУПКА НОМЕРА ЧЕРЕЗ LZT API...*\n\n"
         "Это может занять некоторое время. Ожидайте.",
         parse_mode="Markdown"
     )
 
-    # Выполняем Selenium-логику в отдельном потоке
     def run_purchase():
-        number = lzt_buy_number(user_id)
+        market = _lzt_market_cls(token=LZT_API_TOKEN)
+        if LZT_PROXY:
+            market.settings.proxy = LZT_PROXY
+        return _lzt_buy_single_account(market)
 
-        if number:
-            # Инлайн-кнопка "Получить код"
-            keyboard = InlineKeyboardMarkup([
-                [btn("🔑 ПОЛУЧИТЬ КОД", "lzt_get_code")],
-                [btn("🔙 НАЗАД", "admin_panel")]
-            ])
-            application.bot.edit_message_text(
+    try:
+        success, item_id, phone, login_data, country, price = await asyncio.to_thread(run_purchase)
+        if success and item_id:
+            lzt_purchases[user_id] = {
+                "item_id": item_id,
+                "phone": phone,
+                "login_data": login_data,
+                "country": country,
+                "price": price
+            }
+            phone_display = phone if phone else "Неизвестен"
+            await query.edit_message_text(
                 f"✅ *НОМЕР УСПЕШНО КУПЛЕН!*\n\n"
-                f"📱 Ваш номер: <b>+{number}</b>\n\n"
-                f"Нажмите кнопку ниже, чтобы получить код.",
-                chat_id=user_id,
-                message_id=query.message.message_id,
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            ).result()
-        else:
-            application.bot.edit_message_text(
-                "❌ *НЕ УДАЛОСЬ ПОЛУЧИТЬ НОМЕР.*\n"
-                "Попробуйте ещё раз через некоторое время.",
-                chat_id=user_id,
-                message_id=query.message.message_id,
+                f"📱 Номер: `{phone_display}`\n"
+                f"🌍 Страна: {country or 'N/A'}\n"
+                f"💰 Цена: {price:.2f} ₽\n\n"
+                f"Нажмите кнопку ниже, чтобы получить код подтверждения.",
                 parse_mode="Markdown",
-            ).result()
-
-    threading.Thread(target=run_purchase, daemon=True).start()
+                reply_markup=InlineKeyboardMarkup([
+                    [btn("🔑 ПОЛУЧИТЬ КОД", "lzt_get_code")],
+                    [btn("🔙 НАЗАД", "admin_panel")]
+                ])
+            )
+        else:
+            await query.edit_message_text(
+                "❌ *НЕ УДАЛОСЬ КУПИТЬ НОМЕР.*\n"
+                "Возможные причины:\n"
+                "• Нет подходящих лотов\n"
+                "• Недостаточно средств\n"
+                "• Ошибка API",
+                parse_mode="Markdown",
+                reply_markup=back("admin_panel")
+            )
+    except Exception as e:
+        logger.error(f"❌ Ошибка LZT покупки: {e}")
+        await query.edit_message_text(
+            f"❌ *ОШИБКА ПРИ ПОКУПКЕ:*\n`{str(e)[:200]}`",
+            parse_mode="Markdown",
+            reply_markup=back("admin_panel")
+        )
 
 
 # ===== Обработчик кнопки "ПОЛУЧИТЬ КОД" =====
@@ -2752,41 +2853,60 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-
     if not is_admin(user_id):
         await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
         return
+    if user_id not in lzt_purchases:
+        await query.edit_message_text("❌ Нет активной покупки! Сначала купите номер.", reply_markup=back("admin_panel"))
+        return
 
     await query.edit_message_text(
-        "⏳ *ПОЛУЧАЮ КОД...*\n\n"
+        "⏳ *ПОЛУЧАЮ КОД С LZT MARKET...*\n\n"
         "Это может занять некоторое время. Ожидайте.",
         parse_mode="Markdown"
     )
 
-    # Выполняем Selenium-логику в отдельном потоке
+    item_id = lzt_purchases[user_id]["item_id"]
+    phone = lzt_purchases[user_id].get("phone", "Неизвестен")
+
     def run_get_code():
-        code = lzt_get_code(user_id)
+        market = _lzt_market_cls(token=LZT_API_TOKEN)
+        if LZT_PROXY:
+            market.settings.proxy = LZT_PROXY
+        return _lzt_fetch_verification_code(market, item_id)
 
+    try:
+        code = await asyncio.to_thread(run_get_code)
         if code:
-            application.bot.edit_message_text(
+            await query.edit_message_text(
                 f"✅ *КОД ПОЛУЧЕН!*\n\n"
-                f"🔑 Ваш код: <b>{code}</b>",
-                chat_id=user_id,
-                message_id=query.message.message_id,
-                parse_mode="HTML",
-                reply_markup=back("admin_panel"),
-            ).result()
-        else:
-            application.bot.edit_message_text(
-                "❌ *НЕ УДАЛОСЬ ПОЛУЧИТЬ КОД.*\n"
-                "Попробуйте ещё раз через некоторое время.",
-                chat_id=user_id,
-                message_id=query.message.message_id,
+                f"📱 Номер: `{phone}`\n"
+                f"🔑 Код: `{code}`",
                 parse_mode="Markdown",
-                reply_markup=back("admin_panel"),
-            ).result()
+                reply_markup=back("admin_panel")
+            )
+        else:
+            await query.edit_message_text(
+                "⚠️ *КОД НЕ ПОЛУЧЕН*\n\n"
+                "Возможные причины:\n"
+                "• Код ещё не пришёл (попробуйте позже)\n"
+                "• Аккаунт не требует SMS-код\n"
+                "• Ошибка API",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [btn("🔄 ПОВТОРИТЬ", "lzt_get_code")],
+                    [btn("🔙 НАЗАД", "admin_panel")]
+                ])
+            )
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения кода: {e}")
+        await query.edit_message_text(
+            f"❌ *ОШИБКА ПРИ ПОЛУЧЕНИИ КОДА:*\n`{str(e)[:200]}`",
+            parse_mode="Markdown",
+            reply_markup=back("admin_panel")
+        )
 
-    threading.Thread(target=run_get_code, daemon=True).start()
+
 
 
 # =====================================================================
@@ -2867,40 +2987,40 @@ def main():
     app.add_handler(CallbackQueryHandler(disagree_terms, pattern="^disagree_terms$"))
     app.add_handler(CallbackQueryHandler(reviews, pattern="^reviews$"))
     app.add_handler(CallbackQueryHandler(offer, pattern="^offer$"))
-    app.add_handler(CallbackQueryHandler(accept_offer, pattern="^accept_offer:\d+$"))
-    app.add_handler(CallbackQueryHandler(reject_offer, pattern="^reject_offer:\d+$"))
+    app.add_handler(CallbackQueryHandler(accept_offer, pattern=r"^accept_offer:\d+$"))
+    app.add_handler(CallbackQueryHandler(reject_offer, pattern=r"^reject_offer:\d+$"))
     app.add_handler(CallbackQueryHandler(support, pattern="^support$"))
     app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
     app.add_handler(CallbackQueryHandler(remove_admin, pattern="^remove_admin$"))
-    app.add_handler(CallbackQueryHandler(remove_admin_confirm, pattern="^remove_admin_\d+$"))
+    app.add_handler(CallbackQueryHandler(remove_admin_confirm, pattern=r"^remove_admin_\d+$"))
     app.add_handler(CallbackQueryHandler(list_admins, pattern="^list_admins$"))
 
     app.add_handler(CallbackQueryHandler(lzt_buy_number_callback, pattern="^lzt_buy_number$"))
     app.add_handler(CallbackQueryHandler(lzt_get_code_callback, pattern="^lzt_get_code$"))
 
     app.add_handler(CallbackQueryHandler(shop, pattern="^shop$"))
-    app.add_handler(CallbackQueryHandler(shop_page, pattern="^shop_page_\d+$"))
+    app.add_handler(CallbackQueryHandler(shop_page, pattern=r"^shop_page_\d+$"))
     app.add_handler(CallbackQueryHandler(shop_country, pattern="^shop_country_"))
-    app.add_handler(CallbackQueryHandler(select_phone, pattern="^select_phone_\d+$"))
+    app.add_handler(CallbackQueryHandler(select_phone, pattern=r"^select_phone_\d+$"))
 
     app.add_handler(CallbackQueryHandler(delete_phone_start, pattern="^delete_phone$"))
-    app.add_handler(CallbackQueryHandler(delete_phone_confirm, pattern="^del_phone_\d+$"))
-    app.add_handler(CallbackQueryHandler(delete_phone_yes, pattern="^del_yes_\d+$"))
+    app.add_handler(CallbackQueryHandler(delete_phone_confirm, pattern=r"^del_phone_\d+$"))
+    app.add_handler(CallbackQueryHandler(delete_phone_yes, pattern=r"^del_yes_\d+$"))
 
     app.add_handler(CallbackQueryHandler(edit_price_start, pattern="^edit_price$"))
-    app.add_handler(CallbackQueryHandler(edit_select_phone, pattern="^edit_select_\d+$"))
+    app.add_handler(CallbackQueryHandler(edit_select_phone, pattern=r"^edit_select_\d+$"))
 
-    app.add_handler(CallbackQueryHandler(pay_stars, pattern="^pay_stars_\d+$"))
-    app.add_handler(CallbackQueryHandler(pay_rub, pattern="^pay_rub_\d+$"))
-    app.add_handler(CallbackQueryHandler(check_rub, pattern="^check_rub_\d+$"))
+    app.add_handler(CallbackQueryHandler(pay_stars, pattern=r"^pay_stars_\d+$"))
+    app.add_handler(CallbackQueryHandler(pay_rub, pattern=r"^pay_rub_\d+$"))
+    app.add_handler(CallbackQueryHandler(check_rub, pattern=r"^check_rub_\d+$"))
 
     app.add_handler(CallbackQueryHandler(get_code_button, pattern="^get_code$"))
     app.add_handler(CallbackQueryHandler(code_ok_button, pattern="^code_ok$"))
 
     app.add_handler(CallbackQueryHandler(my_purchases, pattern="^my_purchases$"))
-    app.add_handler(CallbackQueryHandler(purchase_code, pattern="^purchase_code_\d+$"))
-    app.add_handler(CallbackQueryHandler(purchase_get_code, pattern="^purchase_get_code_\d+$"))
-    app.add_handler(CallbackQueryHandler(purchase_ok, pattern="^purchase_ok_\d+$"))
+    app.add_handler(CallbackQueryHandler(purchase_code, pattern=r"^purchase_code_\d+$"))
+    app.add_handler(CallbackQueryHandler(purchase_get_code, pattern=r"^purchase_get_code_\d+$"))
+    app.add_handler(CallbackQueryHandler(purchase_ok, pattern=r"^purchase_ok_\d+$"))
     app.add_handler(CallbackQueryHandler(clear_purchases_start, pattern="^clear_purchases$"))
     app.add_handler(CallbackQueryHandler(clear_purchases_yes, pattern="^clear_purchases_yes$"))
 
