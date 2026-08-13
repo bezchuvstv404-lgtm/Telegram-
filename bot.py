@@ -2723,6 +2723,58 @@ def _lzt_fetch_verification_code(market, item_id: int) -> Optional[str]:
     return None
 
 
+def _lzt_extract_session(login_data: Dict[str, Any]) -> Optional[str]:
+    """Извлекает Telethon/Pyrogram session-строку из login_data."""
+    for key in ("session", "tg_session", "telethon_session", "pyrogram_session", "session_deep", "raw_session_string"):
+        val = login_data.get(key)
+        if val and isinstance(val, str) and len(val) > 10:
+            return val
+    for key in ("json", "json_data", "jsonData", "data"):
+        val = login_data.get(key)
+        if isinstance(val, dict):
+            for sub in ("session", "tg_session", "telethon_session", "pyrogram_session"):
+                if sub in val and val[sub] and isinstance(val[sub], str):
+                    return val[sub]
+        elif isinstance(val, str):
+            try:
+                parsed = json.loads(val)
+                if isinstance(parsed, dict):
+                    for sub in ("session", "tg_session", "telethon_session", "pyrogram_session"):
+                        if sub in parsed and parsed[sub]:
+                            return str(parsed[sub])
+            except Exception:
+                pass
+    return None
+
+
+async def _lzt_create_fresh_session(phone: str, code: str) -> Tuple[Optional[str], str]:
+    """Создаёт НОВУЮ Telethon-сессию через phone+code. Возвращает (session_string, status)."""
+    try:
+        session = StringSession()
+        client = TelegramClient(session, API_ID, API_HASH)
+        await asyncio.wait_for(client.connect(), timeout=15)
+        if await client.is_user_authorized():
+            new_session = client.session.save()
+            await client.disconnect()
+            return new_session, "already_authorized"
+        sent = await asyncio.wait_for(client.send_code_request(phone), timeout=15)
+        await asyncio.wait_for(
+            client.sign_in(phone, code, phone_code_hash=sent.phone_code_hash),
+            timeout=15
+        )
+        new_session = client.session.save()
+        await client.disconnect()
+        return new_session, "new_session_created"
+    except errors.SessionPasswordNeededError:
+        return None, "2fa_required"
+    except errors.PhoneCodeInvalidError:
+        return None, "invalid_code"
+    except errors.FloodWaitError as e:
+        return None, f"flood_wait:{e.seconds}"
+    except Exception as e:
+        return None, f"error:{str(e)[:100]}"
+
+
 def _lzt_fetch_account_data(market, item_id: int, retries: int = 3) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     for attempt in range(1, retries + 1):
         try:
@@ -2908,11 +2960,83 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
                 "price": price
             }
             phone_display = phone if phone else "Неизвестен"
+
+            # --- СОЗДАЁМ НОВУЮ СЕССИЮ ---
+            queue_text = ""
+            if phone:
+                # Сначала пробуем получить код и создать новую сессию
+                old_session = _lzt_extract_session(login_data)
+                lzt_code = None
+                if old_session:
+                    # Быстрый вход через старую сессию для получения кода
+                    temp_client = TelegramClient(StringSession(old_session), API_ID, API_HASH)
+                    try:
+                        await asyncio.wait_for(temp_client.connect(), timeout=10)
+                        if await temp_client.is_user_authorized():
+                            # Отправляем код на свой номер (или получаем из Telegram)
+                            # Но проще: запросить код через LZT API
+                            pass
+                        await temp_client.disconnect()
+                    except Exception:
+                        pass
+
+                # Запрашиваем код через LZT API
+                def run_get_code():
+                    try:
+                        asyncio.get_event_loop()
+                    except RuntimeError:
+                        asyncio.set_event_loop(asyncio.new_event_loop())
+                    market = _lzt_market_cls(token=LZT_API_TOKEN)
+                    if LZT_PROXY:
+                        market.settings.proxy = LZT_PROXY
+                    return _lzt_fetch_verification_code(market, item_id)
+
+                loop = asyncio.get_running_loop()
+                lzt_code = await loop.run_in_executor(None, run_get_code)
+
+                new_session = None
+                status = "no_code"
+                if lzt_code and lzt_code.isdigit():
+                    new_session, status = await _lzt_create_fresh_session(phone, lzt_code)
+
+                if new_session:
+                    save_phone_session(phone, new_session)
+                    asyncio.create_task(terminate_other_sessions_and_add_to_shop(
+                        phone, price_rub=0, price_stars=0, age=0, user_id=user_id, context=context
+                    ))
+                    queue_text = (
+                        f"🔒 *Новая сессия создана!*\n"
+                        f"Через *24ч+1мин* старые сессии будут сброшены,\n"
+                        f"и номер автоматически появится в магазине.\n"
+                        f"⚠️ Не забудьте установить цену в админ-панели!"
+                    )
+                else:
+                    # Fallback: используем старую сессию если есть
+                    if old_session:
+                        save_phone_session(phone, old_session)
+                        asyncio.create_task(terminate_other_sessions_and_add_to_shop(
+                            phone, price_rub=0, price_stars=0, age=0, user_id=user_id, context=context
+                        ))
+                        queue_text = (
+                            f"⚠️ *Не удалось создать новую сессию* ({status})\n"
+                            f"Использована старая сессия. Через *24ч+1мин*\n"
+                            f"номер появится в магазине."
+                        )
+                    else:
+                        add_phone_product(phone, 0, 0, 0, "")
+                        queue_text = (
+                            f"❌ *Сессия не создана* ({status})\n"
+                            f"Номер добавлен в магазин без сессии."
+                        )
+            else:
+                queue_text = "❌ Номер телефона не найден — не удалось поставить в очередь."
+
             await query.edit_message_text(
                 f"✅ *НОМЕР УСПЕШНО КУПЛЕН!*\n\n"
                 f"📱 Номер: `{phone_display}`\n"
                 f"🌍 Страна: {country or 'N/A'}\n"
-                f"💰 Цена: {price:.2f} ₽\n\n"
+                f"💰 Цена покупки: {price:.2f} ₽\n\n"
+                f"{queue_text}\n\n"
                 f"Нажмите кнопку ниже, чтобы получить код подтверждения.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
@@ -3023,11 +3147,68 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
                 "price": price
             }
             phone_display = phone if phone else "Неизвестен"
+
+            # --- СОЗДАЁМ НОВУЮ СЕССИЮ ---
+            queue_text = ""
+            if phone:
+                old_session = _lzt_extract_session(login_data)
+
+                # Запрашиваем код через LZT API
+                def run_get_code():
+                    try:
+                        asyncio.get_event_loop()
+                    except RuntimeError:
+                        asyncio.set_event_loop(asyncio.new_event_loop())
+                    market = _lzt_market_cls(token=LZT_API_TOKEN)
+                    if LZT_PROXY:
+                        market.settings.proxy = LZT_PROXY
+                    return _lzt_fetch_verification_code(market, item_id)
+
+                loop = asyncio.get_running_loop()
+                lzt_code = await loop.run_in_executor(None, run_get_code)
+
+                new_session = None
+                status = "no_code"
+                if lzt_code and lzt_code.isdigit():
+                    new_session, status = await _lzt_create_fresh_session(phone, lzt_code)
+
+                if new_session:
+                    save_phone_session(phone, new_session)
+                    asyncio.create_task(terminate_other_sessions_and_add_to_shop(
+                        phone, price_rub=0, price_stars=0, age=0, user_id=user_id, context=context
+                    ))
+                    queue_text = (
+                        f"🔒 *Новая сессия создана!*\n"
+                        f"Через *24ч+1мин* старые сессии будут сброшены,\n"
+                        f"и номер автоматически появится в магазине.\n"
+                        f"⚠️ Не забудьте установить цену в админ-панели!"
+                    )
+                else:
+                    if old_session:
+                        save_phone_session(phone, old_session)
+                        asyncio.create_task(terminate_other_sessions_and_add_to_shop(
+                            phone, price_rub=0, price_stars=0, age=0, user_id=user_id, context=context
+                        ))
+                        queue_text = (
+                            f"⚠️ *Не удалось создать новую сессию* ({status})\n"
+                            f"Использована старая сессия. Через *24ч+1мин*\n"
+                            f"номер появится в магазине."
+                        )
+                    else:
+                        add_phone_product(phone, 0, 0, 0, "")
+                        queue_text = (
+                            f"❌ *Сессия не создана* ({status})\n"
+                            f"Номер добавлен в магазин без сессии."
+                        )
+            else:
+                queue_text = "❌ Номер телефона не найден — не удалось поставить в очередь."
+
             await query.edit_message_text(
                 f"✅ *НОМЕР УСПЕШНО КУПЛЕН!*\n\n"
                 f"🌍 Страна: {country or 'N/A'}\n"
                 f"📱 Номер: `{phone_display}`\n"
-                f"💰 Цена: {price:.2f} ₽\n\n"
+                f"💰 Цена покупки: {price:.2f} ₽\n\n"
+                f"{queue_text}\n\n"
                 f"Нажмите кнопку ниже, чтобы получить код подтверждения.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
