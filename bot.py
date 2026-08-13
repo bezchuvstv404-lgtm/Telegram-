@@ -14,6 +14,7 @@ import html
 import json
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
+from time import sleep
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 from telegram.ext import (
@@ -28,6 +29,7 @@ from telegram.ext import (
 )
 from telethon import TelegramClient, errors
 from telethon.sessions import StringSession
+from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.functions.auth import ResetAuthorizationsRequest
 
 
@@ -51,9 +53,11 @@ try:
         CHANNEL_ID,
         ADMIN_CHAT_ID,
         ADMINS,
-        COUNTRIES,
-        HELPER_ID,
-        LZT_API_TOKEN,
+        COUNTRIES, HELPER_ID,
+        LZT_URL,
+        LZT_LOGIN,
+        LZT_PASSWORD,
+        LZT_SECRET_ANSWER
     )
 
     print("✅ Конфигурация загружена из config.py")
@@ -106,9 +110,11 @@ CALLBACK_REJECT = "reject_offer"
 # ==========================================
 clients = {}
 accounts = {}
+paid_sessions = {}
 awaiting_phone_confirmation = {}
 pending_rub = {}
 subscriptions = {}
+telethon_clients_cache = {}
 clients_lock = asyncio.Lock()
 accounts_lock = asyncio.Lock()
 
@@ -396,6 +402,12 @@ def back(cb="start"):
     return InlineKeyboardMarkup([[btn("🔙 НАЗАД", cb)]])
 
 
+def hide_phone(phone):
+    if len(phone) > 6:
+        return f"{phone[:4]}****{phone[-4:]}"
+    return phone
+
+
 def validate_phone(phone):
     return bool(re.match(r'^\+\d{10,15}$', phone))
 
@@ -422,6 +434,25 @@ async def check_user_subscription(user_id):
         return False
     except Exception as e:
         logger.error(f"❌ Ошибка проверки подписки: {e}")
+        return False
+
+
+async def check_yoomoney_payment_async(label):
+    """Проверка оплаты через ЮMoney (заглушка)"""
+    try:
+        url = f"https://yoomoney.ru/api/operation-history?label={label}&records=1"
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=timeout) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    operations = data.get('operations', [])
+                    if operations:
+                        for op in operations:
+                            if op.get('status') == 'success':
+                                return True
+        return False
+    except Exception as e:
         return False
 
 
@@ -802,6 +833,10 @@ async def reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[btn("Предложение", CALLBACK_OFFER)]])
+
+
 def offer_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -823,6 +858,23 @@ async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=offer_menu_keyboard(),
     )
     return ConversationHandler.END
+
+
+async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    rows = [
+        [btn("🛒 МАГАЗИН", "shop")],
+        [btn("📦 МОИ ПОКУПКИ", "my_purchases")],
+        [btn("⭐ ОТЗЫВЫ", "reviews")],
+        [btn("💡 ПРЕДЛОЖКА", "offer")],
+        [btn("🆘 ПОДДЕРЖКА", "support")]
+    ]
+    if is_admin(user_id):
+        rows.append([btn("👥 АДМИН-ПАНЕЛЬ", "admin_panel")])
+    text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def make_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2388,6 +2440,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 # LZT CONFIG
 # ---------------------------------------------------------------------------
+LZT_API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzUxMiJ9.eyJzdWIiOjEwODQwMjA3LCJpc3MiOiJsenQiLCJpYXQiOjE3ODY2MzM1ODYsImp0aSI6IjEwMDUwNzMiLCJzY29wZSI6ImJhc2ljIHJlYWQgcG9zdCBjb252ZXJzYXRlIHBheW1lbnQgaW52b2ljZSBjaGF0Ym94IG1hcmtldCIsImV4cCI6MTk0NDMxMzU4Nn0.S6Ywd95JQAzmm_TbTdqcowYL6qZSY7r6E0j89ZJiNmDl-nXLtJ1zCYtttmVMYdQH24Y6WiUAqC3NumgXqPkIFdeL0cvG93QVjYYhCOdHte7Mrr7qqMNpp37LvF5CGZKzeTyWfl5az5pAKVjSjtS-Lta46b-okwgbwFYB1Tuo3cQ"
+
 LZT_MAX_PRICE = 10
 LZT_SPAM_FILTER = "no"
 LZT_EXCLUDE_COUNTRIES = {"TH", "th", "Thailand", "thailand", "Таиланд"}
@@ -2807,7 +2861,8 @@ async def lzt_buy_number_callback(update: Update, context: ContextTypes.DEFAULT_
         return _lzt_buy_single_account(market)
 
     try:
-        success, item_id, phone, login_data, country, price = await asyncio.to_thread(run_purchase)
+        loop = asyncio.get_running_loop()
+        success, item_id, phone, login_data, country, price = await loop.run_in_executor(None, run_purchase)
         if success and item_id:
             lzt_purchases[user_id] = {
                 "item_id": item_id,
@@ -2876,7 +2931,8 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return _lzt_fetch_verification_code(market, item_id)
 
     try:
-        code = await asyncio.to_thread(run_get_code)
+        loop = asyncio.get_running_loop()
+        code = await loop.run_in_executor(None, run_get_code)
         if code:
             await query.edit_message_text(
                 f"✅ *КОД ПОЛУЧЕН!*\n\n"
@@ -2913,7 +2969,8 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
 # ЧАСТЬ 9: ЗАПУСК БОТА
 # =====================================================================
 
-def main():
+async def run_app():
+    """Асинхронный запуск бота. PTB v20+ управляет циклом самостоятельно."""
     logger.info("=" * 60)
     logger.info("🚀 ЗАПУСК БОТА...")
     logger.info("=" * 60)
@@ -2921,10 +2978,6 @@ def main():
     load_admins_from_db()
     logger.info(f"👑 АДМИНЫ: {ADMINS}")
     logger.info(f"🛠️ МОДЕРАТОРЫ: {MODERATORS}")
-
-    flask_thread = threading.Thread(target=start_flask, daemon=True)
-    flask_thread.start()
-    logger.info("✅ Flask-сервер запущен на порту 10000")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -2987,40 +3040,40 @@ def main():
     app.add_handler(CallbackQueryHandler(disagree_terms, pattern="^disagree_terms$"))
     app.add_handler(CallbackQueryHandler(reviews, pattern="^reviews$"))
     app.add_handler(CallbackQueryHandler(offer, pattern="^offer$"))
-    app.add_handler(CallbackQueryHandler(accept_offer, pattern=r"^accept_offer:\d+$"))
-    app.add_handler(CallbackQueryHandler(reject_offer, pattern=r"^reject_offer:\d+$"))
+    app.add_handler(CallbackQueryHandler(accept_offer, pattern="^accept_offer:\d+$"))
+    app.add_handler(CallbackQueryHandler(reject_offer, pattern="^reject_offer:\d+$"))
     app.add_handler(CallbackQueryHandler(support, pattern="^support$"))
     app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
     app.add_handler(CallbackQueryHandler(remove_admin, pattern="^remove_admin$"))
-    app.add_handler(CallbackQueryHandler(remove_admin_confirm, pattern=r"^remove_admin_\d+$"))
+    app.add_handler(CallbackQueryHandler(remove_admin_confirm, pattern="^remove_admin_\d+$"))
     app.add_handler(CallbackQueryHandler(list_admins, pattern="^list_admins$"))
 
     app.add_handler(CallbackQueryHandler(lzt_buy_number_callback, pattern="^lzt_buy_number$"))
     app.add_handler(CallbackQueryHandler(lzt_get_code_callback, pattern="^lzt_get_code$"))
 
     app.add_handler(CallbackQueryHandler(shop, pattern="^shop$"))
-    app.add_handler(CallbackQueryHandler(shop_page, pattern=r"^shop_page_\d+$"))
+    app.add_handler(CallbackQueryHandler(shop_page, pattern="^shop_page_\d+$"))
     app.add_handler(CallbackQueryHandler(shop_country, pattern="^shop_country_"))
-    app.add_handler(CallbackQueryHandler(select_phone, pattern=r"^select_phone_\d+$"))
+    app.add_handler(CallbackQueryHandler(select_phone, pattern="^select_phone_\d+$"))
 
     app.add_handler(CallbackQueryHandler(delete_phone_start, pattern="^delete_phone$"))
-    app.add_handler(CallbackQueryHandler(delete_phone_confirm, pattern=r"^del_phone_\d+$"))
-    app.add_handler(CallbackQueryHandler(delete_phone_yes, pattern=r"^del_yes_\d+$"))
+    app.add_handler(CallbackQueryHandler(delete_phone_confirm, pattern="^del_phone_\d+$"))
+    app.add_handler(CallbackQueryHandler(delete_phone_yes, pattern="^del_yes_\d+$"))
 
     app.add_handler(CallbackQueryHandler(edit_price_start, pattern="^edit_price$"))
-    app.add_handler(CallbackQueryHandler(edit_select_phone, pattern=r"^edit_select_\d+$"))
+    app.add_handler(CallbackQueryHandler(edit_select_phone, pattern="^edit_select_\d+$"))
 
-    app.add_handler(CallbackQueryHandler(pay_stars, pattern=r"^pay_stars_\d+$"))
-    app.add_handler(CallbackQueryHandler(pay_rub, pattern=r"^pay_rub_\d+$"))
-    app.add_handler(CallbackQueryHandler(check_rub, pattern=r"^check_rub_\d+$"))
+    app.add_handler(CallbackQueryHandler(pay_stars, pattern="^pay_stars_\d+$"))
+    app.add_handler(CallbackQueryHandler(pay_rub, pattern="^pay_rub_\d+$"))
+    app.add_handler(CallbackQueryHandler(check_rub, pattern="^check_rub_\d+$"))
 
     app.add_handler(CallbackQueryHandler(get_code_button, pattern="^get_code$"))
     app.add_handler(CallbackQueryHandler(code_ok_button, pattern="^code_ok$"))
 
     app.add_handler(CallbackQueryHandler(my_purchases, pattern="^my_purchases$"))
-    app.add_handler(CallbackQueryHandler(purchase_code, pattern=r"^purchase_code_\d+$"))
-    app.add_handler(CallbackQueryHandler(purchase_get_code, pattern=r"^purchase_get_code_\d+$"))
-    app.add_handler(CallbackQueryHandler(purchase_ok, pattern=r"^purchase_ok_\d+$"))
+    app.add_handler(CallbackQueryHandler(purchase_code, pattern="^purchase_code_\d+$"))
+    app.add_handler(CallbackQueryHandler(purchase_get_code, pattern="^purchase_get_code_\d+$"))
+    app.add_handler(CallbackQueryHandler(purchase_ok, pattern="^purchase_ok_\d+$"))
     app.add_handler(CallbackQueryHandler(clear_purchases_start, pattern="^clear_purchases$"))
     app.add_handler(CallbackQueryHandler(clear_purchases_yes, pattern="^clear_purchases_yes$"))
 
@@ -3035,32 +3088,35 @@ def main():
     logger.info("🛠️ МОДЕРАТОРЫ: " + str(MODERATORS if MODERATORS else "Нет"))
     logger.info("=" * 60)
 
-    while True:
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            global BOT_LOOP
-            BOT_LOOP = loop
-            loop.run_until_complete(app.run_polling())
-            break
-        except RuntimeError as e:
-            if "Event loop is closed" in str(e):
-                logger.warning("🔄 Перезапуск цикла...")
-                continue
-            else:
-                raise e
-        except KeyboardInterrupt:
-            logger.info("🛑 Бот остановлен пользователем")
-            break
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка: {e}")
-            logger.info("🔄 Перезапуск через 5 секунд...")
-            time.sleep(5)
-        finally:
-            try:
-                loop.close()
-            except:
-                pass
+    # Инициализируем и запускаем polling вручную (чтобы loop оставался живым)
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    # Сохраняем running loop для Flask-вебхука
+    global BOT_LOOP
+    BOT_LOOP = asyncio.get_running_loop()
+    logger.info(f"🔄 BOT_LOOP установлен: {BOT_LOOP}")
+
+    # Бесконечное ожидание — loop остаётся открытым
+    stop_event = asyncio.Event()
+    await stop_event.wait()
+
+
+def main():
+    # Запускаем Flask в отдельном потоке ДО asyncio.run()
+    flask_thread = threading.Thread(target=start_flask, daemon=True)
+    flask_thread.start()
+    logger.info("✅ Flask-сервер запущен на порту 10000")
+
+    # Запускаем бота через asyncio.run — он создаст и будет держать event loop
+    try:
+        asyncio.run(run_app())
+    except KeyboardInterrupt:
+        logger.info("🛑 Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка: {e}")
+        raise
 
 
 if __name__ == "__main__":
