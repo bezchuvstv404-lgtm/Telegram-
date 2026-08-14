@@ -1034,6 +1034,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     buttons = [
         [btn("🛒 КУПИТЬ НОМЕР (LZT)", "lzt_buy_menu")],
+        [btn("🔑 СМЕНИТЬ LZT API TOKEN", "change_lzt_token")],
         [btn("📱 ДОБАВИТЬ НОМЕР", "add_phone")],
         [btn("✏️ ИЗМЕНИТЬ ЦЕНУ", "edit_price")]
     ]
@@ -1042,8 +1043,6 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append([btn("🗑️ УДАЛИТЬ АДМИНА", "remove_admin")])
         buttons.append([btn("📊 СПИСОК АДМИНОВ", "list_admins")])
         buttons.append([btn("🗑️ УДАЛИТЬ НОМЕР", "delete_phone")])
-    if is_admin(user_id):
-        buttons.append([btn("🔑 СМЕНИТЬ LZT API TOKEN", "change_lzt_token")])
     buttons.append([btn("🔙 НАЗАД", "start")])
     role = "👑 ГЛАВНЫЙ АДМИН" if is_super_admin(user_id) else "🛠️ МОДЕРАТОР"
     await query.edit_message_text(f"👥 *АДМИН-ПАНЕЛЬ*\n\nВаша роль: {role}", parse_mode="Markdown",
