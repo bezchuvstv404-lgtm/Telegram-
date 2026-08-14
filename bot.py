@@ -53,8 +53,7 @@ try:
         CHANNEL_ID,
         ADMIN_CHAT_ID,
         ADMINS,
-        COUNTRIES, HELPER_ID,
-        LZT_API_TOKEN
+        COUNTRIES, HELPER_ID
     )
 
     print("✅ Конфигурация загружена из config.py")
@@ -94,6 +93,7 @@ REMOVE_ADMIN = 31
 EDIT_PRICE = 40
 EDIT_STARS = 41
 AWAITING_OFFER = 50
+EDIT_LZT_TOKEN = 60
 
 # ==========================================
 # КОНСТАНТЫ ДЛЯ ПРЕДЛОЖЕНИЙ
@@ -185,6 +185,12 @@ def init_db():
                 session TEXT,
                 country_code TEXT,
                 purchased_at TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
             )
         """)
         conn.commit()
@@ -380,7 +386,56 @@ def delete_user_purchases(user_id):
         return False
 
 
+def get_lzt_token():
+    """Получает LZT API токен из БД (fallback на config.py)"""
+    try:
+        conn = sqlite3.connect(DB_NAME, timeout=10)
+        row = conn.execute("SELECT value FROM settings WHERE key='lzt_api_token'").fetchone()
+        conn.close()
+        if row and row[0]:
+            return row[0]
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения LZT токена из БД: {e}")
+    try:
+        from config import LZT_API_TOKEN
+        return LZT_API_TOKEN
+    except Exception:
+        return ""
+
+
+def set_lzt_token(token):
+    """Сохраняет LZT API токен в БД"""
+    try:
+        conn = sqlite3.connect(DB_NAME, timeout=10)
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("lzt_api_token", token))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения LZT токена: {e}")
+        return False
+
+
+def init_lzt_token():
+    """При первом запуске сохраняет токен из config.py в БД"""
+    try:
+        conn = sqlite3.connect(DB_NAME, timeout=10)
+        row = conn.execute("SELECT value FROM settings WHERE key='lzt_api_token'").fetchone()
+        if not row:
+            try:
+                from config import LZT_API_TOKEN
+                conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", ("lzt_api_token", LZT_API_TOKEN))
+                conn.commit()
+                logger.info("✅ LZT_API_TOKEN сохранён в БД из config.py")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось сохранить LZT токен из config.py: {e}")
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации LZT токена: {e}")
+
+
 init_db()
+init_lzt_token()
 
 logger.info("=" * 60)
 logger.info("✅ ЧАСТЬ 2 ЗАГРУЖЕНА: БАЗА ДАННЫХ")
@@ -987,6 +1042,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append([btn("🗑️ УДАЛИТЬ АДМИНА", "remove_admin")])
         buttons.append([btn("📊 СПИСОК АДМИНОВ", "list_admins")])
         buttons.append([btn("🗑️ УДАЛИТЬ НОМЕР", "delete_phone")])
+    if is_admin(user_id):
+        buttons.append([btn("🔑 СМЕНИТЬ LZT API TOKEN", "change_lzt_token")])
     buttons.append([btn("🔙 НАЗАД", "start")])
     role = "👑 ГЛАВНЫЙ АДМИН" if is_super_admin(user_id) else "🛠️ МОДЕРАТОР"
     await query.edit_message_text(f"👥 *АДМИН-ПАНЕЛЬ*\n\nВаша роль: {role}", parse_mode="Markdown",
@@ -1068,6 +1125,44 @@ async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text += "\n🛠️ Модераторов нет"
     await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back("admin_panel"))
+
+
+async def change_lzt_token_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
+        return
+    current = get_lzt_token()
+    hidden = current[:15] + "..." + current[-15:] if len(current) > 35 else current
+    await query.edit_message_text(
+        f"🔑 *СМЕНА LZT API TOKEN*\n\n"
+        f"Текущий токен:\n`{hidden}`\n\n"
+        f"💬 Введите новый токен:",
+        parse_mode="Markdown",
+        reply_markup=back("admin_panel")
+    )
+    return EDIT_LZT_TOKEN
+
+
+async def change_lzt_token_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
+        return ConversationHandler.END
+    new_token = update.message.text.strip()
+    if len(new_token) < 10:
+        await update.message.reply_text("❌ Токен слишком короткий! Минимум 10 символов.", reply_markup=back("admin_panel"))
+        return EDIT_LZT_TOKEN
+    set_lzt_token(new_token)
+    hidden = new_token[:15] + "..." + new_token[-15:] if len(new_token) > 35 else new_token
+    await update.message.reply_text(
+        f"✅ *LZT API TOKEN обновлён!*\n\n"
+        f"Новый токен:\n`{hidden}`",
+        parse_mode="Markdown",
+        reply_markup=back("admin_panel")
+    )
+    return ConversationHandler.END
 
 
 logger.info("=" * 60)
@@ -2943,7 +3038,7 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
             asyncio.get_event_loop()
         except RuntimeError:
             asyncio.set_event_loop(asyncio.new_event_loop())
-        market = _lzt_market_cls(token=LZT_API_TOKEN)
+        market = _lzt_market_cls(token=get_lzt_token())
         if LZT_PROXY:
             market.settings.proxy = LZT_PROXY
         return _lzt_buy_single_account(market, target_country=None)
@@ -2986,7 +3081,7 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
                         asyncio.get_event_loop()
                     except RuntimeError:
                         asyncio.set_event_loop(asyncio.new_event_loop())
-                    market = _lzt_market_cls(token=LZT_API_TOKEN)
+                    market = _lzt_market_cls(token=get_lzt_token())
                     if LZT_PROXY:
                         market.settings.proxy = LZT_PROXY
                     return _lzt_fetch_verification_code(market, item_id)
@@ -3114,7 +3209,7 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
             asyncio.get_event_loop()
         except RuntimeError:
             asyncio.set_event_loop(asyncio.new_event_loop())
-        market = _lzt_market_cls(token=LZT_API_TOKEN)
+        market = _lzt_market_cls(token=get_lzt_token())
         if LZT_PROXY:
             market.settings.proxy = LZT_PROXY
         return _lzt_buy_single_account(market, target_country=country_code)
@@ -3159,7 +3254,7 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
                         asyncio.get_event_loop()
                     except RuntimeError:
                         asyncio.set_event_loop(asyncio.new_event_loop())
-                    market = _lzt_market_cls(token=LZT_API_TOKEN)
+                    market = _lzt_market_cls(token=get_lzt_token())
                     if LZT_PROXY:
                         market.settings.proxy = LZT_PROXY
                     return _lzt_fetch_verification_code(market, item_id)
@@ -3260,7 +3355,7 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
             asyncio.get_event_loop()
         except RuntimeError:
             asyncio.set_event_loop(asyncio.new_event_loop())
-        market = _lzt_market_cls(token=LZT_API_TOKEN)
+        market = _lzt_market_cls(token=get_lzt_token())
         if LZT_PROXY:
             market.settings.proxy = LZT_PROXY
         return _lzt_fetch_verification_code(market, item_id)
@@ -3361,12 +3456,20 @@ async def run_app():
         fallbacks=[CommandHandler("start", start)]
     )
 
+    # ConversationHandler для смены LZT API TOKEN
+    change_lzt_token_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(change_lzt_token_start, pattern="^change_lzt_token$")],
+        states={EDIT_LZT_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, change_lzt_token_confirm)]},
+        fallbacks=[CommandHandler("start", start)]
+    )
+
     # === РЕГИСТРАЦИЯ ВСЕХ ОБРАБОТЧИКОВ ===
     app.add_handler(add_admin_conv)
     app.add_handler(add_phone_conv)
     app.add_handler(edit_rub_conv)
     app.add_handler(edit_stars_conv)
     app.add_handler(offer_conv)
+    app.add_handler(change_lzt_token_conv)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(start_callback, pattern="^start$"))
