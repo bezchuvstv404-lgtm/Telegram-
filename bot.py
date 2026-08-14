@@ -3007,9 +3007,9 @@ async def lzt_buy_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         [btn("🔙 НАЗАД", "admin_panel")]
     ]
     await query.edit_message_text(
-        "🛒 *ПОКУПКА НОМЕРА НА LZT MARKET*\n\n"
+        "🛒 <b>ПОКУПКА НОМЕРА НА LZT MARKET</b>\n\n"
         "Выберите режим покупки:",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(rows)
     )
 
@@ -3027,9 +3027,9 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
         return
 
     await query.edit_message_text(
-        "⏳ *ИДЁТ ПОКУПКА РАНДОМНОГО НОМЕРА...*\n\n"
+        "⏳ <b>ИДЁТ ПОКУПКА РАНДОМНОГО НОМЕРА...</b>\n\n"
         "Это может занять некоторое время. Ожидайте.",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
     def run_purchase():
@@ -3099,8 +3099,8 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
                         phone, price_rub=0, price_stars=0, age=0, user_id=user_id, context=context
                     ))
                     queue_text = (
-                        f"🔒 *Новая сессия создана!*\n"
-                        f"Через *24ч+1мин* старые сессии будут сброшены,\n"
+                        f"🔒 <b>Новая сессия создана!</b>\n"
+                        f"Через <b>24ч+1мин</b> старые сессии будут сброшены,\n"
                         f"и номер автоматически появится в магазине.\n"
                         f"⚠️ Не забудьте установить цену в админ-панели!"
                     )
@@ -3111,28 +3111,33 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
                         asyncio.create_task(terminate_other_sessions_and_add_to_shop(
                             phone, price_rub=0, price_stars=0, age=0, user_id=user_id, context=context
                         ))
+                        safe_status = html.escape(str(status))
                         queue_text = (
-                            f"⚠️ *Не удалось создать новую сессию* ({status})\n"
-                            f"Использована старая сессия. Через *24ч+1мин*\n"
+                            f"⚠️ <b>Не удалось создать новую сессию</b> ({safe_status})\n"
+                            f"Использована старая сессия. Через <b>24ч+1мин</b>\n"
                             f"номер появится в магазине."
                         )
                     else:
                         add_phone_product(phone, 0, 0, 0, "")
+                        safe_status2 = html.escape(str(status))
                         queue_text = (
-                            f"❌ *Сессия не создана* ({status})\n"
+                            f"❌ <b>Сессия не создана</b> ({safe_status2})\n"
                             f"Номер добавлен в магазин без сессии."
                         )
             else:
                 queue_text = "❌ Номер телефона не найден — не удалось поставить в очередь."
 
+            safe_phone = html.escape(str(phone_display))
+            safe_country = html.escape(str(country or "N/A"))
+            safe_price = html.escape(f"{price:.2f}")
             await query.edit_message_text(
-                f"✅ *НОМЕР УСПЕШНО КУПЛЕН!*\n\n"
-                f"📱 Номер: `{phone_display}`\n"
-                f"🌍 Страна: {country or 'N/A'}\n"
-                f"💰 Цена покупки: {price:.2f} ₽\n\n"
+                f"✅ <b>НОМЕР УСПЕШНО КУПЛЕН!</b>\n\n"
+                f"📱 Номер: <code>{safe_phone}</code>\n"
+                f"🌍 Страна: {safe_country}\n"
+                f"💰 Цена покупки: {safe_price} ₽\n\n"
                 f"{queue_text}\n\n"
                 f"Нажмите кнопку ниже, чтобы получить код подтверждения.",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [btn("🔑 ПОЛУЧИТЬ КОД", "lzt_get_code")],
                     [btn("🔙 НАЗАД", "admin_panel")]
@@ -3140,19 +3145,20 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
             )
         else:
             await query.edit_message_text(
-                "❌ *НЕ УДАЛОСЬ КУПИТЬ НОМЕР.*\n"
+                "❌ <b>НЕ УДАЛОСЬ КУПИТЬ НОМЕР.</b>\n"
                 "Возможные причины:\n"
                 "• Нет подходящих лотов\n"
                 "• Недостаточно средств\n"
                 "• Ошибка API",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=back("admin_panel")
             )
     except Exception as e:
         logger.error(f"❌ Ошибка LZT покупки: {e}")
+        safe_err = html.escape(str(e)[:200])
         await query.edit_message_text(
-            f"❌ *ОШИБКА ПРИ ПОКУПКЕ:*\n`{str(e)[:200]}`",
-            parse_mode="Markdown",
+            f"❌ <b>ОШИБКА ПРИ ПОКУПКЕ:</b>\n<code>{safe_err}</code>",
+            parse_mode="HTML",
             reply_markup=back("admin_panel")
         )
 
@@ -3172,10 +3178,10 @@ async def lzt_buy_country_callback(update: Update, context: ContextTypes.DEFAULT
     rows.append([btn("🔙 НАЗАД", "lzt_buy_menu")])
 
     await query.edit_message_text(
-        "🌍 *ВЫБЕРИТЕ СТРАНУ ДЛЯ ПОКУПКИ*\n\n"
+        "🌍 <b>ВЫБЕРИТЕ СТРАНУ ДЛЯ ПОКУПКИ</b>\n\n"
         "Бот купит номер ТОЛЬКО выбранной страны.\n"
         "Если лотов нет — сообщит об этом.",
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(rows)
     )
 
@@ -3197,10 +3203,11 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
     country_name = country_info['name'] if country_info else country_code
     country_flag = country_info['flag'] if country_info else "🌍"
 
+    safe_cname = html.escape(str(country_name))
     await query.edit_message_text(
-        f"⏳ *ИЩУ НОМЕР: {country_flag} {country_name}...*\n\n"
+        f"⏳ <b>ИЩУ НОМЕР: {country_flag} {safe_cname}...</b>\n\n"
         f"Проверяю наличие лотов на LZT Market.",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
     def run_purchase():
@@ -3219,11 +3226,12 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
 
         # Проверяем: лотов вообще не было для этой страны
         if not success and country and not item_id and price is None:
+            safe_cname2 = html.escape(str(country_name))
             await query.edit_message_text(
-                f"⚠️ *НЕТ ЛОТОВ: {country_flag} {country_name}*\n\n"
+                f"⚠️ <b>НЕТ ЛОТОВ: {country_flag} {safe_cname2}</b>\n\n"
                 f"На LZT Market сейчас нет доступных номеров для этой страны.\n"
                 f"Попробуйте позже или выберите другую страну.",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [btn("🔄 ДРУГАЯ СТРАНА", "lzt_buy_country")],
                     [btn("🎲 РАНДОМ", "lzt_buy_random")],
@@ -3272,8 +3280,8 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
                         phone, price_rub=0, price_stars=0, age=0, user_id=user_id, context=context
                     ))
                     queue_text = (
-                        f"🔒 *Новая сессия создана!*\n"
-                        f"Через *24ч+1мин* старые сессии будут сброшены,\n"
+                        f"🔒 <b>Новая сессия создана!</b>\n"
+                        f"Через <b>24ч+1мин</b> старые сессии будут сброшены,\n"
                         f"и номер автоматически появится в магазине.\n"
                         f"⚠️ Не забудьте установить цену в админ-панели!"
                     )
@@ -3283,28 +3291,33 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
                         asyncio.create_task(terminate_other_sessions_and_add_to_shop(
                             phone, price_rub=0, price_stars=0, age=0, user_id=user_id, context=context
                         ))
+                        safe_status = html.escape(str(status))
                         queue_text = (
-                            f"⚠️ *Не удалось создать новую сессию* ({status})\n"
-                            f"Использована старая сессия. Через *24ч+1мин*\n"
+                            f"⚠️ <b>Не удалось создать новую сессию</b> ({safe_status})\n"
+                            f"Использована старая сессия. Через <b>24ч+1мин</b>\n"
                             f"номер появится в магазине."
                         )
                     else:
                         add_phone_product(phone, 0, 0, 0, "")
+                        safe_status2 = html.escape(str(status))
                         queue_text = (
-                            f"❌ *Сессия не создана* ({status})\n"
+                            f"❌ <b>Сессия не создана</b> ({safe_status2})\n"
                             f"Номер добавлен в магазин без сессии."
                         )
             else:
                 queue_text = "❌ Номер телефона не найден — не удалось поставить в очередь."
 
+            safe_phone2 = html.escape(str(phone_display))
+            safe_country2 = html.escape(str(country or "N/A"))
+            safe_price2 = html.escape(f"{price:.2f}")
             await query.edit_message_text(
-                f"✅ *НОМЕР УСПЕШНО КУПЛЕН!*\n\n"
-                f"🌍 Страна: {country or 'N/A'}\n"
-                f"📱 Номер: `{phone_display}`\n"
-                f"💰 Цена покупки: {price:.2f} ₽\n\n"
+                f"✅ <b>НОМЕР УСПЕШНО КУПЛЕН!</b>\n\n"
+                f"🌍 Страна: {safe_country2}\n"
+                f"📱 Номер: <code>{safe_phone2}</code>\n"
+                f"💰 Цена покупки: {safe_price2} ₽\n\n"
                 f"{queue_text}\n\n"
                 f"Нажмите кнопку ниже, чтобы получить код подтверждения.",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [btn("🔑 ПОЛУЧИТЬ КОД", "lzt_get_code")],
                     [btn("🔙 НАЗАД", "admin_panel")]
@@ -3312,18 +3325,19 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
             )
         else:
             await query.edit_message_text(
-                "❌ *НЕ УДАЛОСЬ КУПИТЬ НОМЕР.*\n"
+                "❌ <b>НЕ УДАЛОСЬ КУПИТЬ НОМЕР.</b>\n"
                 "Возможные причины:\n"
                 "• Недостаточно средств\n"
                 "• Ошибка API",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=back("admin_panel")
             )
     except Exception as e:
         logger.error(f"❌ Ошибка LZT покупки: {e}")
+        safe_err = html.escape(str(e)[:200])
         await query.edit_message_text(
-            f"❌ *ОШИБКА ПРИ ПОКУПКЕ:*\n`{str(e)[:200]}`",
-            parse_mode="Markdown",
+            f"❌ <b>ОШИБКА ПРИ ПОКУПКЕ:</b>\n<code>{safe_err}</code>",
+            parse_mode="HTML",
             reply_markup=back("admin_panel")
         )
 
@@ -3341,9 +3355,9 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     await query.edit_message_text(
-        "⏳ *ПОЛУЧАЮ КОД С LZT MARKET...*\n\n"
+        "⏳ <b>ПОЛУЧАЮ КОД С LZT MARKET...</b>\n\n"
         "Это может занять некоторое время. Ожидайте.",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
     item_id = lzt_purchases[user_id]["item_id"]
@@ -3363,21 +3377,23 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
         loop = asyncio.get_running_loop()
         code = await loop.run_in_executor(None, run_get_code)
         if code:
+            safe_phone3 = html.escape(str(phone))
+            safe_code = html.escape(str(code))
             await query.edit_message_text(
-                f"✅ *КОД ПОЛУЧЕН!*\n\n"
-                f"📱 Номер: `{phone}`\n"
-                f"🔑 Код: `{code}`",
-                parse_mode="Markdown",
+                f"✅ <b>КОД ПОЛУЧЕН!</b>\n\n"
+                f"📱 Номер: <code>{safe_phone3}</code>\n"
+                f"🔑 Код: <code>{safe_code}</code>",
+                parse_mode="HTML",
                 reply_markup=back("admin_panel")
             )
         else:
             await query.edit_message_text(
-                "⚠️ *КОД НЕ ПОЛУЧЕН*\n\n"
+                "⚠️ <b>КОД НЕ ПОЛУЧЕН</b>\n\n"
                 "Возможные причины:\n"
                 "• Код ещё не пришёл (попробуйте позже)\n"
                 "• Аккаунт не требует SMS-код\n"
                 "• Ошибка API",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [btn("🔄 ПОВТОРИТЬ", "lzt_get_code")],
                     [btn("🔙 НАЗАД", "admin_panel")]
@@ -3385,9 +3401,10 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
             )
     except Exception as e:
         logger.error(f"❌ Ошибка получения кода: {e}")
+        safe_err3 = html.escape(str(e)[:200])
         await query.edit_message_text(
-            f"❌ *ОШИБКА ПРИ ПОЛУЧЕНИИ КОДА:*\n`{str(e)[:200]}`",
-            parse_mode="Markdown",
+            f"❌ <b>ОШИБКА ПРИ ПОЛУЧЕНИИ КОДА:</b>\n<code>{safe_err3}</code>",
+            parse_mode="HTML",
             reply_markup=back("admin_panel")
         )
 
