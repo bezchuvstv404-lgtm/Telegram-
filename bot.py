@@ -1,6 +1,6 @@
-# =====================================================================
+# ========================================================================
 # ЧАСТЬ 1: ИМПОРТЫ + КОНФИГУРАЦИЯ (ИМПОРТ ИЗ CONFIG.PY)
-# =====================================================================
+# ========================================================================
 
 import asyncio
 import sqlite3
@@ -53,7 +53,8 @@ try:
         CHANNEL_ID,
         ADMIN_CHAT_ID,
         ADMINS,
-        COUNTRIES, HELPER_ID
+        COUNTRIES,
+        HELPER_ID
     )
 
     print("✅ Конфигурация загружена из config.py")
@@ -83,9 +84,9 @@ MODERATORS = []
 ALL_ADMINS = []
 
 # ==========================================
-# СОСТОЯНИЯ ДЛЯ CONVERSATIONHANDLER
+# СОСОЯНИЯ ДЛЯ CONVERSATIONHANDLER
 # ==========================================
-PHONE_PRICE, PHONE_STARS, PHONE_AGE, PHONE_NUMBER = range(10, 14)
+PHONE_PRICE, PHONE_STARS, PHONE_NUMBER = range(10, 13)
 ENTER_CODE = 20
 ENTER_2FA = 21
 ADD_ADMIN = 30
@@ -94,6 +95,7 @@ EDIT_PRICE = 40
 EDIT_STARS = 41
 AWAITING_OFFER = 50
 EDIT_LZT_TOKEN = 60
+COMPENSATE_USER = 70
 
 # ==========================================
 # КОНСТАНТЫ ДЛЯ ПРЕДЛОЖЕНИЙ
@@ -129,7 +131,8 @@ def get_country_by_phone(phone):
     """Определяет страну по номеру телефона"""
     if phone and not phone.startswith('+'):
         phone = '+' + phone
-    for country in COUNTRIES:
+    # Сортируем по длине кода (сначала более длинные), чтобы избежать ложных совпадений
+    for country in sorted(COUNTRIES, key=lambda c: len(c['phone_code']), reverse=True):
         if phone.startswith(country['phone_code']):
             return country['code']
     return "UNKNOWN"
@@ -163,7 +166,6 @@ def init_db():
                 phone TEXT,
                 price_rub INTEGER,
                 price_stars INTEGER,
-                age INTEGER,
                 session TEXT,
                 available INTEGER DEFAULT 1,
                 created_at TIMESTAMP
@@ -192,7 +194,6 @@ def init_db():
                 phone TEXT,
                 price_rub INTEGER,
                 price_stars INTEGER,
-                age INTEGER,
                 session TEXT,
                 country_code TEXT,
                 purchased_at TIMESTAMP
@@ -262,7 +263,7 @@ def get_phone_products():
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         rows = conn.execute(
-            "SELECT id, phone, price_rub, price_stars, age FROM phone_products WHERE available=1 ORDER BY id DESC").fetchall()
+            "SELECT id, phone, price_rub, price_stars FROM phone_products WHERE available=1 ORDER BY id DESC").fetchall()
         conn.close()
         return rows
     except Exception as e:
@@ -273,7 +274,7 @@ def get_phone_products():
 def get_phone_product(product_id):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
-        row = conn.execute("SELECT id, phone, price_rub, price_stars, age, session FROM phone_products WHERE id=?",
+        row = conn.execute("SELECT id, phone, price_rub, price_stars, session FROM phone_products WHERE id=?",
                            (product_id,)).fetchone()
         conn.close()
         return row
@@ -282,18 +283,18 @@ def get_phone_product(product_id):
         return None
 
 
-def add_phone_product(phone, price_rub, price_stars, age=0, session=""):
+def add_phone_product(phone, price_rub, price_stars, session=""):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         cursor = conn.execute("SELECT id FROM phone_products WHERE phone=?", (phone,))
         exists = cursor.fetchone()
         if exists:
-            conn.execute("UPDATE phone_products SET price_rub=?, price_stars=?, age=?, session=?, available=1 WHERE phone=?",
-                         (price_rub, price_stars, age, session, phone))
+            conn.execute("UPDATE phone_products SET price_rub=?, price_stars=?, session=?, available=1 WHERE phone=?",
+                         (price_rub, price_stars, session, phone))
         else:
             conn.execute(
-                "INSERT INTO phone_products(phone, price_rub, price_stars, age, session, available, created_at) VALUES(?, ?, ?, ?, ?, 1, ?)",
-                (phone, price_rub, price_stars, age, session, datetime.now()))
+                "INSERT INTO phone_products(phone, price_rub, price_stars, session, available, created_at) VALUES(?, ?, ?, ?, 1, ?)",
+                (phone, price_rub, price_stars, session, datetime.now()))
         conn.commit()
         conn.close()
         return True
@@ -330,11 +331,12 @@ def save_phone_session(phone, session):
         cursor = conn.execute("SELECT id FROM phone_products WHERE phone=? LIMIT 1", (phone,))
         exists = cursor.fetchone()
         if exists:
-            conn.execute("UPDATE phone_products SET session=? WHERE phone=?", (session, phone))
+            # ❗ Главное: сбрасываем available=0, чтобы номер не был виден в магазине до окончания 24ч
+            conn.execute("UPDATE phone_products SET session=?, available=0 WHERE phone=?", (session, phone))
         else:
             conn.execute(
-                "INSERT INTO phone_products(phone, price_rub, price_stars, age, session, available, created_at) VALUES(?, ?, ?, ?, ?, 0, ?)",
-                (phone, 0, 0, 0, session, datetime.now()))
+                "INSERT INTO phone_products(phone, price_rub, price_stars, session, available, created_at) VALUES(?, ?, ?, ?, 0, ?)",
+                (phone, 0, 0, session, datetime.now()))
         conn.commit()
         conn.close()
         return True
@@ -354,13 +356,13 @@ def get_phone_session(phone):
         return None
 
 
-def add_purchase(user_id, phone, price_rub, price_stars, session, country_code, age=0):
+def add_purchase(user_id, phone, price_rub, price_stars, session, country_code):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         conn.execute("""
-            INSERT INTO purchases (user_id, phone, price_rub, price_stars, age, session, country_code, purchased_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, phone, price_rub, price_stars, age, session, country_code, datetime.now()))
+            INSERT INTO purchases (user_id, phone, price_rub, price_stars, session, country_code, purchased_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, phone, price_rub, price_stars, session, country_code, datetime.now()))
         conn.commit()
         conn.close()
         return True
@@ -682,11 +684,10 @@ async def terminate_other_sessions_and_add_to_shop(phone, price_rub, price_stars
         return
 
     # --- Добавляем в магазин ---
-    result = add_phone_product(phone, price_rub, price_stars, 0, session_string)
+    result = add_phone_product(phone, price_rub, price_stars, session_string)
     if result:
         logger.info(f"✅ Номер {phone} добавлен в магазин после 24ч")
 
-        # Определяем страну для красивого уведомления
         country_code = get_country_by_phone(phone)
         country = get_country_by_code(country_code)
         country_flag = country['flag'] if country else "🌍"
@@ -1046,7 +1047,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [btn("🛒 КУПИТЬ НОМЕР (LZT)", "lzt_buy_menu")],
         [btn("🔑 СМЕНИТЬ LZT API TOKEN", "change_lzt_token")],
         [btn("📱 ДОБАВИТЬ НОМЕР", "add_phone")],
-        [btn("✏️ ИЗМЕНИТЬ ЦЕНУ", "edit_price")]
+        [btn("✏️ ИЗМЕНИТЬ ЦЕНУ", "edit_price")],
+        [btn("🎁 ВОЗМЕСТИТЬ АККАУНТ", "compensate")]
     ]
     if is_super_admin(user_id):
         buttons.append([btn("➕ ДОБАВИТЬ АДМИНА", "add_admin")])
@@ -1096,11 +1098,14 @@ async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_super_admin(update.effective_user.id):
         await query.edit_message_text("❌ Только главный админ!", reply_markup=back("admin_panel"))
         return
-    rows = [[btn(f"👑 {ADMINS[0]} (Главный)", "noop")]]
+    rows = []
     for mod_id in MODERATORS:
         rows.append([btn(f"🗑️ {mod_id}", f"remove_admin_{mod_id}")])
     rows.append([btn("🔙 НАЗАД", "admin_panel")])
-    await query.edit_message_text("🗑️ Выберите для удаления:", reply_markup=InlineKeyboardMarkup(rows))
+    await query.edit_message_text(
+        f"👑 Главный: {ADMINS[0]}\n\n🗑️ Выберите модератора для удаления:",
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
 
 
 async def remove_admin_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1174,6 +1179,160 @@ async def change_lzt_token_confirm(update: Update, context: ContextTypes.DEFAULT
     return ConversationHandler.END
 
 
+# =====================================================================
+# ВОЗМЕСТИТЬ АККАУНТ (КОМПЕНСАЦИЯ)
+# =====================================================================
+
+async def compensate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало возмещения — запрашиваем ID пользователя"""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
+        return ConversationHandler.END
+
+    # Проверяем наличие номеров в магазине
+    products = get_phone_products()
+    if not products:
+        await query.edit_message_text(
+            "❌ *В МАГАЗИНЕ НЕТ НОМЕРОВ ДЛЯ ВОЗМЕЩЕНИЯ!*\n\n"
+            "Сначала добавьте номера в магазин.",
+            parse_mode="Markdown",
+            reply_markup=back("admin_panel")
+        )
+        return ConversationHandler.END
+
+    await query.edit_message_text(
+        "🎁 *ВОЗМЕСТИТЬ АККАУНТ*\n\n"
+        "📝 Введите @username пользователя, которому нужно возместить аккаунт:\n\n"
+        "💡 Пример: `@username` или `username`",
+        parse_mode="Markdown",
+        reply_markup=back("admin_panel")
+    )
+    return COMPENSATE_USER
+
+
+async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получаем username пользователя, берём рандомный номер и отправляем ему"""
+    admin_id = update.effective_user.id
+    if not is_admin(admin_id):
+        await update.message.reply_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
+        return ConversationHandler.END
+
+    target_username = update.message.text.strip()
+    # Убираем @ если есть
+    if target_username.startswith('@'):
+        target_username = target_username[1:]
+
+    if not target_username or not re.match(r'^[a-zA-Z0-9_]{5,32}$', target_username):
+        await update.message.reply_text(
+            "❌ Неверный формат username!\n"
+            "Введите @username (латиница, цифры, _)",
+            reply_markup=back("admin_panel")
+        )
+        return COMPENSATE_USER
+
+    # Получаем user_id по username
+    try:
+        chat = await context.bot.get_chat(f"@{target_username}")
+        target_user_id = chat.id
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения user_id по username @{target_username}: {e}")
+        await update.message.reply_text(
+            f"❌ *ПОЛЬЗОВАТЕЛЬ @{target_username} НЕ НАЙДЕН!*\n\n"
+            f"Проверьте правильность username.",
+            parse_mode="Markdown",
+            reply_markup=back("admin_panel")
+        )
+        return COMPENSATE_USER
+
+    # Берём рандомный номер из магазина
+    products = get_phone_products()
+    if not products:
+        await update.message.reply_text(
+            "❌ *В МАГАЗИНЕ НЕТ НОМЕРОВ ДЛЯ ВОЗМЕЩЕНИЯ!*",
+            parse_mode="Markdown",
+            reply_markup=back("admin_panel")
+        )
+        return ConversationHandler.END
+
+    import random
+    product = random.choice(products)
+    product_id, phone, price_rub, price_stars = product
+
+    # Получаем полные данные с сессией
+    full_product = get_phone_product(product_id)
+    if not full_product:
+        await update.message.reply_text("❌ Ошибка получения номера!", reply_markup=back("admin_panel"))
+        return ConversationHandler.END
+
+    _, phone, price_rub, price_stars, session = full_product
+
+    # Удаляем из магазина
+    delete_phone_product(product_id)
+
+    # Сохраняем покупку для пользователя
+    country_code = get_country_by_phone(phone)
+    add_purchase(target_user_id, phone, price_rub, price_stars, session, country_code)
+
+    # Сохраняем для получения кода
+    awaiting_phone_confirmation[target_user_id] = {
+        'phone': phone,
+        'product_id': product_id,
+        'session': session
+    }
+
+    # Определяем страну для сообщения
+    country = get_country_by_code(country_code) if country_code else None
+    flag = country['flag'] if country else "🌍"
+    name = country['name'] if country else "Неизвестно"
+    code = country['phone_code'] if country else ""
+
+    # Отправляем пользователю сообщение с кнопкой ПОЛУЧИТЬ КОД
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                f"🎁 *ВАМ ВЫДАН КОМПЕНСАЦИОННЫЙ АККАУНТ!*\n\n"
+                f"🌍 *Страна:* {flag} {name} ({code})\n"
+                f"📱 *ВАШ НОМЕР:* `{phone}`\n"
+                f"💰 {price_rub} ₽ / {price_stars}⭐\n\n"
+                f"---\n"
+                f"⚠️ *ПОСЛЕ ВХОДА В АККАУНТ ОБЯЗАТЕЛЬНО:*\n"
+                f"1️⃣ Смените номер телефона на свой\n"
+                f"2️⃣ Поставьте двухфакторную аутентификацию (2FA)\n"
+                f"3️⃣ Установите облачный пароль\n"
+                f"4️⃣ Привяжите почту для восстановления\n\n"
+                f"🔑 Нажмите кнопку, чтобы получить код для входа:"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [btn("🔑 ПОЛУЧИТЬ КОД", "get_code")],
+                [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
+            ])
+        )
+        await update.message.reply_text(
+            f"✅ *АККАУНТ ВОЗМЕЩЁН!*\n\n"
+            f"👤 Пользователь: `{target_user_id}`\n"
+            f"📱 Номер: `{phone}`\n"
+            f"🌍 {flag} {name}\n\n"
+            f"🎁 Номер отправлен пользователю с кнопкой «ПОЛУЧИТЬ КОД».",
+            parse_mode="Markdown",
+            reply_markup=back("admin_panel")
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки возмещения: {e}")
+        await update.message.reply_text(
+            f"❌ *НЕ УДАЛОСЬ ОТПРАВИТЬ АККАУНТ*\n\n"
+            f"Пользователь `{target_user_id}` не найден или бот заблокирован.\n\n"
+            f"Номер `{phone}` удалён из магазина.",
+            parse_mode="Markdown",
+            reply_markup=back("admin_panel")
+        )
+
+    return ConversationHandler.END
+
+
 logger.info("=" * 60)
 logger.info("✅ ЧАСТЬ 6 ЗАГРУЖЕНА: ОТЗЫВЫ, ПОДДЕРЖКА, АДМИН-ПАНЕЛЬ")
 logger.info("=" * 60)
@@ -1217,11 +1376,6 @@ async def add_phone_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Введи число!")
         return PHONE_STARS
 
-
-async def add_phone_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Возраст больше не используется — сразу переходим к номеру
-    await update.message.reply_text("📱 Введи номер (+79991234567):")
-    return PHONE_NUMBER
 
 
 async def add_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1403,7 +1557,7 @@ async def edit_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Нет номеров", reply_markup=back("admin_panel"))
         return
     rows = []
-    for pid, phone, price_rub, price_stars, _ in products:
+    for pid, phone, price_rub, price_stars in products:
         country_code = get_country_by_phone(phone)
         country = get_country_by_code(country_code)
         flag = country['flag'] if country else "🌍"
@@ -1522,7 +1676,7 @@ async def delete_phone_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("❌ Нет номеров", reply_markup=back("admin_panel"))
         return
     rows = []
-    for pid, phone, price_rub, price_stars, _ in products:
+    for pid, phone, price_rub, price_stars in products:
         country_code = get_country_by_phone(phone)
         country = get_country_by_code(country_code)
         flag = country['flag'] if country else "🌍"
@@ -1569,7 +1723,7 @@ async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ Номеров нет", reply_markup=back("start"))
         return
     countries_data = {}
-    for pid, phone, price_rub, price_stars, _ in products:
+    for pid, phone, price_rub, price_stars in products:
         country_code = get_country_by_phone(phone)
         if country_code not in countries_data:
             countries_data[country_code] = []
@@ -1635,7 +1789,7 @@ async def shop_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     products = get_phone_products()
     country_phones = []
-    for pid, phone, price_rub, price_stars, _ in products:
+    for pid, phone, price_rub, price_stars in products:
         if phone.startswith(country['phone_code']):
             country_phones.append((pid, phone, price_rub, price_stars, 0))
     if not country_phones:
@@ -1664,7 +1818,7 @@ async def select_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not product:
         await query.edit_message_text("❌ Номер уже продан или удалён")
         return
-    pid, phone, price_rub, price_stars, _, session = product[:6]
+    pid, phone, price_rub, price_stars, session = product[:5]
     country_code = get_country_by_phone(phone)
     country = get_country_by_code(country_code) if country_code else None
     flag = country['flag'] if country else "🌍"
@@ -1695,7 +1849,7 @@ async def my_purchases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     rows = []
     for purchase in purchases:
-        pid, phone, price_rub, price_stars, _, session, country_code, purchased_at = purchase
+        pid, phone, price_rub, price_stars, session, country_code, purchased_at = purchase
         country = get_country_by_code(country_code) if country_code else None
         flag = country['flag'] if country else "🌍"
         code = country['phone_code'] if country else ""
@@ -1877,7 +2031,7 @@ async def pay_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not product:
             await query.edit_message_text("❌ Не найден")
             return
-        pid, phone, price_rub, price_stars, _, session = product[:6]
+        pid, phone, price_rub, price_stars, session = product[:5]
         await query.message.reply_invoice(
             title=f"Номер {phone[:4]}****{phone[-4:]}",
             description=f"Номер Telegram",
@@ -1917,7 +2071,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Номер не найден")
         return
 
-    pid, phone, price_rub, price_stars, _, session = product[:6]
+    pid, phone, price_rub, price_stars, session = product[:5]
     delete_phone_product(product_id)
 
     country_code = get_country_by_phone(phone)
@@ -1960,7 +2114,7 @@ async def pay_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Номер больше не доступен!")
         return
 
-    product_id, phone, price_rub, price_stars, _, session = product
+    product_id, phone, price_rub, price_stars, session = product
     user_id = query.from_user.id
 
     # Определяем страну
@@ -2030,7 +2184,7 @@ async def check_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Товар не найден!")
         return
 
-    product_id, phone, price_rub, price_stars, _, session = product
+    product_id, phone, price_rub, price_stars, session = product
 
     delete_phone_product(product_id)
     country_code = get_country_by_phone(phone)
@@ -2067,7 +2221,7 @@ async def auto_deliver_product(user_id, product_id):
         logger.error(f"❌ Товар {product_id} не найден в БД!")
         return
 
-    product_id, phone, price_rub, price_stars, _, session = product
+    product_id, phone, price_rub, price_stars, session = product
     logger.info(f"📱 Найден товар в БД: {phone}")
 
     # === УДАЛЯЕМ ИЗ МАГАЗИНА ===
@@ -2334,7 +2488,7 @@ def send_notification_to_telegram(data):
 
                 product = get_phone_product(product_id)
                 if product:
-                    pid, phone, price_rub, price_stars, _, session = product[:6]
+                    pid, phone, price_rub, price_stars, session = product[:5]
                     country_code = get_country_by_phone(phone)
                     country = get_country_by_code(country_code) if country_code else None
                     country_flag = country['flag'] if country else "🌍"
@@ -3177,7 +3331,7 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
                         phone, price_rub_shop, price_stars_shop, user_id, context
                     ))
                 else:
-                    add_phone_product(phone, price_rub_shop, price_stars_shop, 0, "")
+                    add_phone_product(phone, price_rub_shop, price_stars_shop, "")
             else:
                 queue_text = "❌ Номер телефона не найден — не удалось поставить в очередь."
 
@@ -3234,7 +3388,7 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def lzt_buy_country_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать список стран для выбора."""
+    """Показать список стран для выбора (с пагинацией)."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -3242,15 +3396,47 @@ async def lzt_buy_country_callback(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
         return
 
+    # Определяем текущую страницу
+    page = 0
+    if query.data.startswith("lzt_country_page_"):
+        try:
+            page = int(query.data.replace("lzt_country_page_", ""))
+        except ValueError:
+            page = 0
+
+    # Пагинация: 10 стран на страницу (Telegram лимит ~100 кнопок)
+    PER_PAGE = 10
+    total_pages = (len(COUNTRIES) + PER_PAGE - 1) // PER_PAGE
+    if page >= total_pages:
+        page = total_pages - 1
+    if page < 0:
+        page = 0
+
+    start_idx = page * PER_PAGE
+    end_idx = min(start_idx + PER_PAGE, len(COUNTRIES))
+    page_countries = COUNTRIES[start_idx:end_idx]
+
     rows = []
-    for country in COUNTRIES:
+    for country in page_countries:
         rows.append([btn(f"{country['flag']} {country['name']}", f"lzt_country_{country['code']}")])
+
+    # Навигация
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(btn("⬅️", f"lzt_country_page_{page - 1}"))
+    nav_buttons.append(btn(f"📄 {page + 1}/{total_pages}", "lzt_buy_country"))
+    if page < total_pages - 1:
+        nav_buttons.append(btn("➡️", f"lzt_country_page_{page + 1}"))
+    if nav_buttons:
+        rows.append(nav_buttons)
+
     rows.append([btn("🔙 НАЗАД", "lzt_buy_menu")])
 
     await query.edit_message_text(
-        "🌍 <b>ВЫБЕРИТЕ СТРАНУ ДЛЯ ПОКУПКИ</b>\n\n"
-        "Бот купит номер ТОЛЬКО выбранной страны.\n"
-        "Если лотов нет — сообщит об этом.",
+        f"🌍 <b>ВЫБЕРИТЕ СТРАНУ ДЛЯ ПОКУПКИ</b>\n\n"
+        f"📄 Страница {page + 1} из {total_pages}\n\n"
+        f"Бот купит номер ТОЛЬКО выбранной страны.\n"
+        f"Если лотов нет — сообщит об этом.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(rows)
     )
@@ -3372,7 +3558,7 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
                         phone, price_rub_shop, price_stars_shop, user_id, context
                     ))
                 else:
-                    add_phone_product(phone, price_rub_shop, price_stars_shop, 0, "")
+                    add_phone_product(phone, price_rub_shop, price_stars_shop, "")
             else:
                 queue_text = "❌ Номер телефона не найден — не удалось поставить в очередь."
 
@@ -3528,7 +3714,6 @@ async def run_app():
         states={
             PHONE_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_phone_price)],
             PHONE_STARS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_phone_stars)],
-            PHONE_AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_phone_age)],
             PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_phone_number)],
             ENTER_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_phone_code)],
             ENTER_2FA: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_phone_2fa)],
@@ -3564,6 +3749,13 @@ async def run_app():
         fallbacks=[CommandHandler("start", start)]
     )
 
+    # ConversationHandler для возмещения аккаунта
+    compensate_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(compensate_start, pattern="^compensate$")],
+        states={COMPENSATE_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, compensate_confirm)]},
+        fallbacks=[CommandHandler("start", start)]
+    )
+
     # === РЕГИСТРАЦИЯ ВСЕХ ОБРАБОТЧИКОВ ===
     app.add_handler(add_admin_conv)
     app.add_handler(add_phone_conv)
@@ -3571,6 +3763,7 @@ async def run_app():
     app.add_handler(edit_stars_conv)
     app.add_handler(offer_conv)
     app.add_handler(change_lzt_token_conv)
+    app.add_handler(compensate_conv)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(start_callback, pattern="^start$"))
@@ -3579,44 +3772,44 @@ async def run_app():
     app.add_handler(CallbackQueryHandler(disagree_terms, pattern="^disagree_terms$"))
     app.add_handler(CallbackQueryHandler(reviews, pattern="^reviews$"))
     app.add_handler(CallbackQueryHandler(offer, pattern="^offer$"))
-    app.add_handler(CallbackQueryHandler(accept_offer, pattern="^accept_offer:\d+$"))
-    app.add_handler(CallbackQueryHandler(reject_offer, pattern="^reject_offer:\d+$"))
+    app.add_handler(CallbackQueryHandler(accept_offer, pattern=r"^accept_offer:\d+$"))
+    app.add_handler(CallbackQueryHandler(reject_offer, pattern=r"^reject_offer:\d+$"))
     app.add_handler(CallbackQueryHandler(support, pattern="^support$"))
     app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
     app.add_handler(CallbackQueryHandler(remove_admin, pattern="^remove_admin$"))
-    app.add_handler(CallbackQueryHandler(remove_admin_confirm, pattern="^remove_admin_\d+$"))
+    app.add_handler(CallbackQueryHandler(remove_admin_confirm, pattern=r"^remove_admin_\d+$"))
     app.add_handler(CallbackQueryHandler(list_admins, pattern="^list_admins$"))
 
     app.add_handler(CallbackQueryHandler(lzt_buy_menu_callback, pattern="^lzt_buy_menu$"))
     app.add_handler(CallbackQueryHandler(lzt_buy_random_callback, pattern="^lzt_buy_random$"))
     app.add_handler(CallbackQueryHandler(lzt_buy_country_callback, pattern="^lzt_buy_country$"))
-    app.add_handler(CallbackQueryHandler(lzt_buy_country_callback, pattern="^lzt_country_page_\d+$"))
+    app.add_handler(CallbackQueryHandler(lzt_buy_country_callback, pattern=r"^lzt_country_page_\d+$"))
     app.add_handler(CallbackQueryHandler(lzt_buy_country_select_callback, pattern="^lzt_country_[A-Z]+$"))
     app.add_handler(CallbackQueryHandler(lzt_get_code_callback, pattern="^lzt_get_code$"))
 
     app.add_handler(CallbackQueryHandler(shop, pattern="^shop$"))
-    app.add_handler(CallbackQueryHandler(shop_page, pattern="^shop_page_\d+$"))
+    app.add_handler(CallbackQueryHandler(shop_page, pattern=r"^shop_page_\d+$"))
     app.add_handler(CallbackQueryHandler(shop_country, pattern="^shop_country_"))
-    app.add_handler(CallbackQueryHandler(select_phone, pattern="^select_phone_\d+$"))
+    app.add_handler(CallbackQueryHandler(select_phone, pattern=r"^select_phone_\d+$"))
 
     app.add_handler(CallbackQueryHandler(delete_phone_start, pattern="^delete_phone$"))
-    app.add_handler(CallbackQueryHandler(delete_phone_confirm, pattern="^del_phone_\d+$"))
-    app.add_handler(CallbackQueryHandler(delete_phone_yes, pattern="^del_yes_\d+$"))
+    app.add_handler(CallbackQueryHandler(delete_phone_confirm, pattern=r"^del_phone_\d+$"))
+    app.add_handler(CallbackQueryHandler(delete_phone_yes, pattern=r"^del_yes_\d+$"))
 
     app.add_handler(CallbackQueryHandler(edit_price_start, pattern="^edit_price$"))
-    app.add_handler(CallbackQueryHandler(edit_select_phone, pattern="^edit_select_\d+$"))
+    app.add_handler(CallbackQueryHandler(edit_select_phone, pattern=r"^edit_select_\d+$"))
 
-    app.add_handler(CallbackQueryHandler(pay_stars, pattern="^pay_stars_\d+$"))
-    app.add_handler(CallbackQueryHandler(pay_rub, pattern="^pay_rub_\d+$"))
-    app.add_handler(CallbackQueryHandler(check_rub, pattern="^check_rub_\d+$"))
+    app.add_handler(CallbackQueryHandler(pay_stars, pattern=r"^pay_stars_\d+$"))
+    app.add_handler(CallbackQueryHandler(pay_rub, pattern=r"^pay_rub_\d+$"))
+    app.add_handler(CallbackQueryHandler(check_rub, pattern=r"^check_rub_\d+$"))
 
     app.add_handler(CallbackQueryHandler(get_code_button, pattern="^get_code$"))
     app.add_handler(CallbackQueryHandler(code_ok_button, pattern="^code_ok$"))
 
     app.add_handler(CallbackQueryHandler(my_purchases, pattern="^my_purchases$"))
-    app.add_handler(CallbackQueryHandler(purchase_code, pattern="^purchase_code_\d+$"))
-    app.add_handler(CallbackQueryHandler(purchase_get_code, pattern="^purchase_get_code_\d+$"))
-    app.add_handler(CallbackQueryHandler(purchase_ok, pattern="^purchase_ok_\d+$"))
+    app.add_handler(CallbackQueryHandler(purchase_code, pattern=r"^purchase_code_\d+$"))
+    app.add_handler(CallbackQueryHandler(purchase_get_code, pattern=r"^purchase_get_code_\d+$"))
+    app.add_handler(CallbackQueryHandler(purchase_ok, pattern=r"^purchase_ok_\d+$"))
     app.add_handler(CallbackQueryHandler(clear_purchases_start, pattern="^clear_purchases$"))
     app.add_handler(CallbackQueryHandler(clear_purchases_yes, pattern="^clear_purchases_yes$"))
 
