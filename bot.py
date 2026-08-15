@@ -1204,8 +1204,8 @@ async def compensate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(
         "🎁 *ВОЗМЕСТИТЬ АККАУНТ*\n\n"
-        "📝 Введите @username пользователя, которому нужно возместить аккаунт:\n\n"
-        "💡 Пример: `@username` или `username`",
+        "📝 Введите ID пользователя (Telegram ID), которому нужно возместить аккаунт:\n\n"
+        "💡 Пример: `123456789`",
         parse_mode="Markdown",
         reply_markup=back("admin_panel")
     )
@@ -1213,38 +1213,21 @@ async def compensate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получаем username пользователя, берём рандомный номер и отправляем ему"""
+    """Получаем ID пользователя, берём рандомный номер и отправляем ему"""
     admin_id = update.effective_user.id
     if not is_admin(admin_id):
         await update.message.reply_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
         return ConversationHandler.END
 
-    target_username = update.message.text.strip()
-    # Убираем @ если есть
-    if target_username.startswith('@'):
-        target_username = target_username[1:]
-
-    if not target_username or not re.match(r'^[a-zA-Z0-9_]{5,32}$', target_username):
+    target_user_id = update.message.text.strip()
+    if not target_user_id.isdigit():
         await update.message.reply_text(
-            "❌ Неверный формат username!\n"
-            "Введите @username (латиница, цифры, _)",
+            "❌ Введите ID (только цифры)!",
             reply_markup=back("admin_panel")
         )
         return COMPENSATE_USER
 
-    # Получаем user_id по username
-    try:
-        chat = await context.bot.get_chat(f"@{target_username}")
-        target_user_id = chat.id
-    except Exception as e:
-        logger.error(f"❌ Ошибка получения user_id по username @{target_username}: {e}")
-        await update.message.reply_text(
-            f"❌ *ПОЛЬЗОВАТЕЛЬ @{target_username} НЕ НАЙДЕН!*\n\n"
-            f"Проверьте правильность username.",
-            parse_mode="Markdown",
-            reply_markup=back("admin_panel")
-        )
-        return COMPENSATE_USER
+    target_user_id = int(target_user_id)
 
     # Берём рандомный номер из магазина
     products = get_phone_products()
@@ -1842,35 +1825,79 @@ async def my_purchases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    purchases = get_user_purchases(user_id)
-    if not purchases:
-        await query.edit_message_text("📦 *МОИ ПОКУПКИ*\n\nУ вас пока нет покупок.", parse_mode="Markdown",
-                                      reply_markup=back("start"))
-        return
-    rows = []
-    for purchase in purchases:
-        pid, phone, price_rub, price_stars, session, country_code, purchased_at = purchase
-        country = get_country_by_code(country_code) if country_code else None
-        flag = country['flag'] if country else "🌍"
-        code = country['phone_code'] if country else ""
-        rows.append([btn(f"{flag} {code} {phone}", f"purchase_code_{pid}")])
-    rows.append([btn("🗑️ ОЧИСТИТЬ ИСТОРИЮ", "clear_purchases")])
-    rows.append([btn("🔙 НАЗАД", "start")])
-    await query.edit_message_text(
-        f"📦 *МОИ ПОКУПКИ*\n\n📱 Всего покупок: {len(purchases)}\n\nВыберите номер для просмотра информации:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(rows)
-    )
+
+    try:
+        purchases = get_user_purchases(user_id)
+        if not purchases:
+            await query.edit_message_text(
+                "📦 *МОИ ПОКУПКИ*\n\nУ вас пока нет покупок.",
+                parse_mode="Markdown",
+                reply_markup=back("start")
+            )
+            return
+
+        rows = []
+        # Ограничиваем до 50 покупок на страницу, чтобы не превысить лимит кнопок Telegram
+        MAX_BUTTONS = 50
+        shown_purchases = purchases[:MAX_BUTTONS]
+
+        for purchase in shown_purchases:
+            pid, phone, price_rub, price_stars, session, country_code, purchased_at = purchase
+            if not phone:
+                continue
+            country = get_country_by_code(country_code) if country_code else None
+            flag = country['flag'] if country else "🌍"
+            code = country['phone_code'] if country else ""
+            rows.append([btn(f"{flag} {code} {phone}", f"purchase_code_{pid}")])
+
+        if not rows:
+            await query.edit_message_text(
+                "📦 *МОИ ПОКУПКИ*\n\nУ вас пока нет покупок.",
+                parse_mode="Markdown",
+                reply_markup=back("start")
+            )
+            return
+
+        # Кнопка очистки добавляется отдельно
+        rows.append([btn("🗑️ ОЧИСТИТЬ ИСТОРИЮ", "clear_purchases")])
+        rows.append([btn("🎯 НАЗАД", "start")])
+
+        text = f"📦 *МОИ ПОКУПКИ*\n\n📱 Всего покупок: {len(purchases)}\n\nВыберите номер для просмотра информации:"
+        if len(purchases) > MAX_BUTTONS:
+            text += f"\n\n⚠️ Показаны первые {MAX_BUTTONS} записей."
+
+        await query.edit_message_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows)
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка в my_purchases: {e}")
+        try:
+            await query.edit_message_text(
+                "❌ Произошла ошибка при загрузке покупок.\nПопробуйте позже.",
+                reply_markup=back("start")
+            )
+        except Exception:
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="❌ Произошла ошибка при загрузке покупок.\nПопробуйте позже.",
+                    reply_markup=back("start")
+                )
+            except Exception as e2:
+                logger.error(f"❌ Не удалось отправить сообщение об ошибке: {e2}")
 
 
 async def purchase_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user_id = query.from_user.id
     purchase_id = int(query.data.replace("purchase_code_", ""))
     conn = sqlite3.connect(DB_NAME, timeout=10)
     row = conn.execute(
-        "SELECT phone, price_rub, price_stars, session, country_code, purchased_at FROM purchases WHERE id=?",
-        (purchase_id,)).fetchone()
+        "SELECT phone, price_rub, price_stars, session, country_code, purchased_at FROM purchases WHERE id=? AND user_id=?",
+        (purchase_id, user_id)).fetchone()
     conn.close()
     if not row:
         await query.edit_message_text("❌ Покупка не найдена", reply_markup=back("my_purchases"))
