@@ -1432,7 +1432,7 @@ async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await context.bot.send_message(
             chat_id=target_user_id,
             text=(
-                f"🎁 *ВАМ ВЫДАН КОМПЕНСАЦИОННЫЙ АККАУНТ!*\n\n"
+                f"🎁 *ВАМ ВЫДАН АККАУНТ!*\n\n"
                 f"🌍 *Страна:* {flag} {name} ({code})\n"
                 f"📱 *ВАШ НОМЕР:* `{phone}`\n"
                 f"💰 {price_rub} ₽ / {price_stars}⭐\n\n"
