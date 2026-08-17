@@ -1077,10 +1077,10 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                   reply_markup=InlineKeyboardMarkup(buttons))
 
 
-# НОВАЯ ФУНКЦИЯ ОЧЕРЕДИ С ОТОБРАЖЕНИЕМ ВРЕМЕНИ
+
 async def queue_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает очередь с оставшимся временем до добавления в магазин.
-       Кнопка ОБНОВИТЬ перезагружает данные."""
+       Кнопка ОБНОВИТЬ перезагружает данные и добавляет готовые номера в магазин."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -1089,6 +1089,57 @@ async def queue_status_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     queued = get_queued_phone_products()
+    now = datetime.now()
+    WAIT_SECONDS = 86460  # 24 часа + 1 минута
+
+    # Проверяем, есть ли номера, которые уже должны были быть добавлены в магазин
+    # (если фоновый таск не сработал, например, после перезапуска бота)
+    ready_to_add = []
+    still_waiting = []
+    for item in queued:
+        pid, phone, price_rub, price_stars, created_at = item
+        if created_at:
+            if isinstance(created_at, str):
+                try:
+                    created_dt = datetime.fromisoformat(created_at.replace(' ', 'T'))
+                except:
+                    created_dt = now
+            else:
+                created_dt = created_at
+        else:
+            created_dt = now
+
+        elapsed = (now - created_dt).total_seconds()
+        if elapsed >= WAIT_SECONDS:
+            ready_to_add.append(item)
+        else:
+            still_waiting.append(item)
+
+    # Добавляем готовые номера в магазин ТОЛЬКО если есть сессия.
+    # Номера без сессии УДАЛЯЕМ из очереди полностью.
+    added_count = 0
+    removed_count = 0
+    for item in ready_to_add:
+        pid, phone, price_rub, price_stars, created_at = item
+        phone = normalize_phone(phone)
+        session_string = get_phone_session(phone)
+        if session_string:
+            result = add_phone_product(phone, price_rub, price_stars, session_string)
+            if result:
+                added_count += 1
+                logger.info(f"✅ Номер {phone} добавлен в магазин (по кнопке ОБНОВИТЬ)")
+        else:
+            # Сессии нет — удаляем запись из очереди (БД) полностью
+            delete_result = delete_phone_product(pid)
+            if delete_result:
+                removed_count += 1
+                logger.warning(f"🗑️ Номер {phone} удалён из очереди — сессия не найдена")
+            else:
+                logger.error(f"❌ Не удалось удалить {phone} из очереди")
+
+    # Перезагружаем очередь после добавления/удаления
+    if added_count > 0 or removed_count > 0:
+        queued = get_queued_phone_products()
 
     if not queued:
         await query.edit_message_text(
@@ -1097,14 +1148,14 @@ async def queue_status_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "Новые номера попадают сюда после входа в аккаунт\n"
             "и добавляются в магазин через 24 часа + 1 минута.",
             parse_mode="Markdown",
-            reply_markup=back("admin_panel")
+            reply_markup=InlineKeyboardMarkup([
+                [btn("🔄 ОБНОВИТЬ", "queue_status")],
+                [btn("🔙 НАЗАД", "admin_panel")]
+            ])
         )
         return
 
     lines = []
-    now = datetime.now()
-    WAIT_SECONDS = 86460  # 24 часа + 1 минута
-
     for idx, (pid, phone, price_rub, price_stars, created_at) in enumerate(queued, 1):
         phone = normalize_phone(phone)
         country_code = get_country_by_phone(phone)
@@ -1148,6 +1199,9 @@ async def queue_status_callback(update: Update, context: ContextTypes.DEFAULT_TY
         f"⏰ Номера добавляются через 24ч+1мин после входа.\n\n"
         f"{chr(10).join(lines)}"
     )
+
+    if added_count > 0:
+        text = f"✅ **{added_count} номер(ов) добавлено в магазин!**\n\n" + text
 
     if len(text) > 4000:
         text = text[:4000] + "\n\n⚠️ Список обрезан из-за лимита."
