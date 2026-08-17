@@ -3538,7 +3538,14 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
                         phone, price_rub_shop, price_stars_shop, user_id, context
                     ))
                 else:
-                    add_phone_product(phone, price_rub_shop, price_stars_shop, "")
+                    # ❗ НЕ добавляем номер в магазин сразу — он появится только после 24ч ожидания
+                    # и удаления всех сессий. Без сессии номер НЕ попадает в магазин.
+                    queue_text = (
+                        f"❌ <b>Сессия не получена</b> ({html.escape(str(status))})\n"
+                        f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
+                        f"⚠️ Номер НЕ добавлен в магазин — сессия не найдена.\n"
+                        f"Попробуйте создать сессию позже."
+                    )
             else:
                 queue_text = "❌ Номер телефона не найден — не удалось поставить в очередь."
 
@@ -3563,12 +3570,7 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
                 f"🌍 Страна: {safe_country}\n"
                 f"💰 Цена покупки: {safe_price} ₽\n\n"
                 f"{queue_text}"
-                f"{code_text}\n"
-                f"⚠️ <b>Сразу после входа в аккаунт:</b>\n"
-                f"1️⃣ Смените номер на свой\n"
-                f"2️⃣ Поставьте 2FA\n"
-                f"3️⃣ Установите облачный пароль\n"
-                f"4️⃣ Привяжите почту",
+                f"{code_text}\n",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
@@ -3768,7 +3770,14 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
                         phone, price_rub_shop, price_stars_shop, user_id, context
                     ))
                 else:
-                    add_phone_product(phone, price_rub_shop, price_stars_shop, "")
+                    # ❗ НЕ добавляем номер в магазин сразу — он появится только после 24ч ожидания
+                    # и удаления всех сессий. Без сессии номер НЕ попадает в магазин.
+                    queue_text = (
+                        f"❌ <b>Сессия не получена</b> ({html.escape(str(status))})\n"
+                        f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
+                        f"⚠️ Номер НЕ добавлен в магазин — сессия не найдена.\n"
+                        f"Попробуйте создать сессию позже."
+                    )
             else:
                 queue_text = "❌ Номер телефона не найден — не удалось поставить в очередь."
 
