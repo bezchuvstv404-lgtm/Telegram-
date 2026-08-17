@@ -1126,13 +1126,10 @@ async def queue_status_callback(update: Update, context: ContextTypes.DEFAULT_TY
         elapsed = (now - created_dt).total_seconds()
         remaining = max(0, WAIT_SECONDS - elapsed)
 
-        if remaining <= 0:
-            time_left = "⏳ Скоро будет добавлен"
-        else:
-            hours = int(remaining // 3600)
-            minutes = int((remaining % 3600) // 60)
-            seconds = int(remaining % 60)
-            time_left = f"⏳ {hours:02d}:{minutes:02d}:{seconds:02d}"
+        hours = int(remaining // 3600)
+        minutes = int((remaining % 3600) // 60)
+        seconds = int(remaining % 60)
+        time_left = f"⏳ {hours:02d}:{minutes:02d}:{seconds:02d}"
 
         # Если цена не задана, подставляем из конфига
         if (price_rub == 0 or price_stars == 0) and country:
