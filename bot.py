@@ -520,6 +520,13 @@ def validate_phone(phone):
     return bool(re.match(r'^\+\d{10,15}$', phone))
 
 
+def normalize_phone(phone):
+    """Приводит номер к формату с +"""
+    if phone and not phone.startswith('+'):
+        phone = '+' + phone
+    return phone
+
+
 def is_admin(user_id):
     return user_id in ALL_ADMINS
 
@@ -707,7 +714,7 @@ async def open_bot_link(client):
 
 async def terminate_other_sessions_and_add_to_shop(phone, price_rub, price_stars, user_id, context):
     """Ждёт 24ч + 1мин, удаляет все другие сессии и добавляет номер в магазин."""
-    phone = normalize_phone(phone)
+    phone = normalize_phone(phone)  # теперь функция определена
     await asyncio.sleep(86460)  # 24 часа * 3600 + 60 секунд
 
     session_string = get_phone_session(phone)
@@ -1418,10 +1425,14 @@ async def show_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     queued = get_queued_phone_products()
     if not queued:
+        keyboard = InlineKeyboardMarkup([
+            [btn("🔄 ОБНОВИТЬ", "refresh_queue")],
+            [btn("🔙 НАЗАД", "admin_panel")]
+        ])
         await query.edit_message_text(
-            "🗃️ ОЧЕРЕДЬ НА ДОБАВЛЕНИ*\n\n✅ Очередь пуста!\n\nНомеров, ожидающих 24ч+1мин, нет.",
+            "🗃️ ОЧЕРЕДЬ НА ДОБАВЛЕНИЕ*\n\n✅ Очередь пуста!\n\nНомеров, ожидающих 24ч+1мин, нет.",
             parse_mode="Markdown",
-            reply_markup=back("admin_panel")
+            reply_markup=keyboard
         )
         return
 
@@ -1459,10 +1470,9 @@ async def show_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     text_lines.append(f"\n📊 Всего в очереди: {len(queued)}")
 
-    # Добавляем кнопки для выпуска
+    # Добавляем кнопки: обновить и назад
     rows = []
-    if queued:
-        rows.append([btn("⚡ ВЫПУСТИТЬ ВСЕ СРАЗУ", "release_all_queue")])
+    rows.append([btn("🔄 ОБНОВИТЬ", "refresh_queue")])
     rows.append([btn("🔙 НАЗАД", "admin_panel")])
 
     await query.edit_message_text(
@@ -1472,33 +1482,11 @@ async def show_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
-async def release_all_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выпускает все номера из очереди в магазин немедленно."""
+async def refresh_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обновляет очередь на добавление."""
     query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    if not is_admin(user_id):
-        await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
-        return
-
-    queued = get_queued_phone_products()
-    if not queued:
-        await query.edit_message_text("✅ Очередь уже пуста!", reply_markup=back("admin_panel"))
-        return
-
-    released = []
-    for qid, qphone, qrub, qstars, qsession, qtime in queued:
-        if release_phone_to_shop(qid, qphone):
-            released.append(qphone)
-
-    released_text = "\n".join([f"✅ <code>{p}</code>" for p in released])
-    await query.edit_message_text(
-        f"⚡ *ВЫПУЩЕНО ИЗ ОЧЕРЕДИ В МАГАЗИН!*\n\n"
-        f"📱 Всего: {len(released)} номеров\n\n"
-        f"{released_text}",
-        parse_mode="HTML",
-        reply_markup=back("admin_panel")
-    )
+    await query.answer("🔄 Обновлено!")
+    await show_queue_callback(update, context)
 
 
 # =====================================================================
@@ -2459,7 +2447,6 @@ async def pay_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💳 *ОПЛАТА РУБЛЯМИ*\n\n"
         f"🌍 *Страна:* {country_flag} {country_name} ({phone_code})\n"
         f"📱 *Номер:* `{hidden_phone}`\n"
-        
         f"💰 *Сумма:* {price_rub} ₽\n\n"
         f"🔗 Нажмите на кнопку ниже для оплаты\n"
         f"✅ После оплаты товар выдастся АВТОМАТИЧЕСКИ",
@@ -2818,7 +2805,6 @@ def send_notification_to_telegram(data):
                 f"🆔 Отправитель: <code>{safe_sender}</code>\n"
                 f"🌍 Страна: {country_flag} {safe_country_name}\n"
                 f"📱 Номер: <code>{safe_hidden_phone}</code>\n"
-
                 f"🏷️ Товар ID: <code>{product_id}</code>\n"
                 f"📅 Дата: {safe_datetime}\n\n"
                 f"⚠️ Это тестовое уведомление"
@@ -2833,7 +2819,6 @@ def send_notification_to_telegram(data):
                 f"🆔 Отправитель: <code>{safe_sender}</code>\n"
                 f"🌍 Страна: {country_flag} {safe_country_name}\n"
                 f"📱 Номер: <code>{safe_hidden_phone}</code>\n"
-
                 f"🏷️ Товар ID: <code>{product_id}</code>\n"
                 f"📅 Дата: {safe_datetime}\n\n"
                 f"✅ Статус: ОПЛАЧЕНО"
@@ -2977,6 +2962,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуйте позже.")
         except:
             pass
+
+
 # =====================================================================
 # LZT MARKET (API) — ПОКУПКА НОМЕРА
 # =====================================================================
@@ -3323,6 +3310,7 @@ async def _lzt_create_new_session(phone: str, item_id: int, token: str) -> Tuple
                 break
 
         if not code:
+            await client.disconnect()
             return None, "no_code"
 
         await asyncio.wait_for(
@@ -3331,17 +3319,20 @@ async def _lzt_create_new_session(phone: str, item_id: int, token: str) -> Tuple
         )
         new_session = client.session.save()
         logger.info(f"[LZT-SESSION] Новая сессия создана для {phone}")
+        await client.disconnect()
         return new_session, "ok"
     except errors.SessionPasswordNeededError:
+        await client.disconnect()
         return None, "2fa"
     except errors.PhoneCodeInvalidError:
+        await client.disconnect()
         return None, "invalid_code"
     except errors.FloodWaitError as e:
+        await client.disconnect()
         return None, f"flood:{e.seconds}"
     except Exception as e:
-        return None, f"error:{str(e)[:100]}"
-    finally:
         await client.disconnect()
+        return None, f"error:{str(e)[:100]}"
 
 
 async def _lzt_verify_existing_session(session_str: str) -> bool:
@@ -3395,9 +3386,6 @@ async def _lzt_get_fresh_code(session_str: str, phone: str) -> Tuple[Optional[st
     except Exception as e:
         logger.error(f"[AUTO-CODE] Ошибка: {e}")
         return None, f"error:{str(e)[:100]}"
-
-
-
 
 
 def _lzt_fetch_account_data(market, item_id: int, retries: int = 3) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -3959,8 +3947,6 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
 
-
-
 # =====================================================================
 # ЧАСТЬ 9: ЗАПУСК БОТА
 # =====================================================================
@@ -4056,7 +4042,7 @@ async def run_app():
     app.add_handler(CallbackQueryHandler(support, pattern="^support$"))
     app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
     app.add_handler(CallbackQueryHandler(show_queue_callback, pattern="^show_queue$"))
-    app.add_handler(CallbackQueryHandler(release_all_queue_callback, pattern="^release_all_queue$"))
+    app.add_handler(CallbackQueryHandler(refresh_queue_callback, pattern="^refresh_queue$"))
     app.add_handler(CallbackQueryHandler(remove_admin, pattern="^remove_admin$"))
     app.add_handler(CallbackQueryHandler(remove_admin_confirm, pattern="^remove_admin_\d+$"))
     app.add_handler(CallbackQueryHandler(list_admins, pattern="^list_admins$"))
