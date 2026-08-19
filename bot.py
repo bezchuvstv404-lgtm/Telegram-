@@ -94,6 +94,9 @@ EDIT_PRICE = 40
 EDIT_STARS = 41
 AWAITING_OFFER = 50
 EDIT_LZT_TOKEN = 60
+COMPENSATE_USER = 70
+QUEUE_PHONE = 80
+QUEUE_ACTION = 81
 
 # ==========================================
 # КОНСТАНТЫ ДЛЯ ПРЕДЛОЖЕНИЙ
@@ -1256,7 +1259,9 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [btn("🛒 КУПИТЬ НОМЕР (LZT)", "lzt_buy_menu")],
         [btn("🔑 СМЕНИТЬ LZT API TOKEN", "change_lzt_token")],
         [btn("📱 ДОБАВИТЬ НОМЕР", "add_phone")],
-        [btn("✏️ ИЗМЕНИТЬ ЦЕНУ", "edit_price")]
+        [btn("✏️ ИЗМЕНИТЬ ЦЕНУ", "edit_price")],
+        [btn("🎁 ВОЗМЕСТИТЬ АККАУНТ", "compensate")],
+        [btn("🗃️ ОЧЕРЕДЬ НА ДОБАВЛЕНИЕ", "show_queue")],
     ]
     if is_super_admin(user_id):
         buttons.append([btn("➕ ДОБАВИТЬ АДМИНА", "add_admin")])
@@ -1381,6 +1386,241 @@ async def change_lzt_token_confirm(update: Update, context: ContextTypes.DEFAULT
         parse_mode="Markdown",
         reply_markup=back("admin_panel")
     )
+    return ConversationHandler.END
+
+
+# =====================================================================
+# ОЧЕРЕДЬ НА ДОБАВЛЕНИЕ (ПРОСМОТР)
+# =====================================================================
+
+async def show_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает очередь номеров на добавление в магазин."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
+        return
+
+    queued = get_queued_phone_products()
+    if not queued:
+        await query.edit_message_text(
+            "🗃️ *ОЧЕРЕДЬ НА ДОБАВЛЕНИЕ*\n\n✅ Очередь пуста!\n\nНомеров, ожидающих 24ч+1мин, нет.",
+            parse_mode="Markdown",
+            reply_markup=back("admin_panel")
+        )
+        return
+
+    text_lines = ["🗃️ *ОЧЕРЕДЬ НА ДОБАВЛЕНИЕ*\n"]
+    now = datetime.now()
+    for i, (qid, qphone, qrub, qstars, qsession, qtime) in enumerate(queued, 1):
+        # Оставшееся время
+        try:
+            if isinstance(qtime, str):
+                try:
+                    created_dt = datetime.strptime(qtime, "%Y-%m-%d %H:%M:%S.%f")
+                except ValueError:
+                    created_dt = datetime.strptime(qtime, "%Y-%m-%d %H:%M:%S")
+            else:
+                created_dt = datetime.strptime(str(qtime), "%Y-%m-%d %H:%M:%S")
+            elapsed = (now - created_dt).total_seconds()
+            remaining = max(86460 - elapsed, 0)
+            hours = int(remaining // 3600)
+            mins = int((remaining % 3600) // 60)
+            secs = int(remaining % 60)
+            time_left = f"⏳ {hours}ч {mins}мин {secs}с"
+        except Exception:
+            time_left = "⏳ Время неизвестно"
+
+        # Страна
+        country_code = get_country_by_phone(qphone)
+        country = get_country_by_code(country_code)
+        flag = country['flag'] if country else "🌍"
+
+        text_lines.append(
+            f"{i}. {flag} <code>{qphone}</code>\n"
+            f"   💰 {qrub}₽ / {qstars}⭐\n"
+            f"   {time_left}"
+        )
+
+    text_lines.append(f"\n📊 Всего в очереди: {len(queued)}")
+
+    # Добавляем кнопки для выпуска
+    rows = []
+    if queued:
+        rows.append([btn("⚡ ВЫПУСТИТЬ ВСЕ СРАЗУ", "release_all_queue")])
+    rows.append([btn("🔙 НАЗАД", "admin_panel")])
+
+    await query.edit_message_text(
+        "\n".join(text_lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
+
+
+async def release_all_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выпускает все номера из очереди в магазин немедленно."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
+        return
+
+    queued = get_queued_phone_products()
+    if not queued:
+        await query.edit_message_text("✅ Очередь уже пуста!", reply_markup=back("admin_panel"))
+        return
+
+    released = []
+    for qid, qphone, qrub, qstars, qsession, qtime in queued:
+        if release_phone_to_shop(qid, qphone):
+            released.append(qphone)
+
+    released_text = "\n".join([f"✅ <code>{p}</code>" for p in released])
+    await query.edit_message_text(
+        f"⚡ *ВЫПУЩЕНО ИЗ ОЧЕРЕДИ В МАГАЗИН!*\n\n"
+        f"📱 Всего: {len(released)} номеров\n\n"
+        f"{released_text}",
+        parse_mode="HTML",
+        reply_markup=back("admin_panel")
+    )
+
+
+# =====================================================================
+# ВОЗМЕСТИТЬ АККАУНТ (КОМПЕНСАЦИЯ)
+# =====================================================================
+
+async def compensate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало возмещения — запрашиваем ID пользователя"""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_user.id):
+        await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
+        return ConversationHandler.END
+
+    # Проверяем наличие номеров в магазине
+    products = get_phone_products()
+    if not products:
+        await query.edit_message_text(
+            "❌ *В МАГАЗИНЕ НЕТ НОМЕРОВ ДЛЯ ВОЗМЕЩЕНИЯ!*\n\n"
+            "Сначала добавьте номера в магазин.",
+            parse_mode="Markdown",
+            reply_markup=back("admin_panel")
+        )
+        return ConversationHandler.END
+
+    await query.edit_message_text(
+        "🎁 *ВОЗМЕСТИТЬ АККАУНТ*\n\n"
+        "📝 Введите ID пользователя (Telegram ID), которому нужно возместить аккаунт:\n\n"
+        "💡 Пример: `123456789`",
+        parse_mode="Markdown",
+        reply_markup=back("admin_panel")
+    )
+    return COMPENSATE_USER
+
+
+async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получаем ID пользователя, берём рандомный номер и отправляем ему"""
+    admin_id = update.effective_user.id
+    if not is_admin(admin_id):
+        await update.message.reply_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
+        return ConversationHandler.END
+
+    target_user_id = update.message.text.strip()
+    if not target_user_id.isdigit():
+        await update.message.reply_text(
+            "❌ Введите ID (только цифры)!",
+            reply_markup=back("admin_panel")
+        )
+        return COMPENSATE_USER
+
+    target_user_id = int(target_user_id)
+
+    # Берём рандомный номер из магазина
+    products = get_phone_products()
+    if not products:
+        await update.message.reply_text(
+            "❌ *В МАГАЗИНЕ НЕТ НОМЕРОВ ДЛЯ ВОЗМЕЩЕНИЯ!*",
+            parse_mode="Markdown",
+            reply_markup=back("admin_panel")
+        )
+        return ConversationHandler.END
+
+    import random
+    product = random.choice(products)
+    product_id, phone, price_rub, price_stars = product
+
+    # Получаем полные данные с сессией
+    full_product = get_phone_product(product_id)
+    if not full_product:
+        await update.message.reply_text("❌ Ошибка получения номера!", reply_markup=back("admin_panel"))
+        return ConversationHandler.END
+
+    _, phone, price_rub, price_stars, session = full_product
+
+    # Удаляем из магазина
+    delete_phone_product(product_id)
+
+    # Сохраняем покупку для пользователя
+    country_code = get_country_by_phone(phone)
+    add_purchase(target_user_id, phone, price_rub, price_stars, session, country_code)
+
+    # Сохраняем для получения кода
+    awaiting_phone_confirmation[target_user_id] = {
+        'phone': phone,
+        'product_id': product_id,
+        'session': session
+    }
+
+    # Определяем страну для сообщения
+    country = get_country_by_code(country_code) if country_code else None
+    flag = country['flag'] if country else "🌍"
+    name = country['name'] if country else "Неизвестно"
+    code = country['phone_code'] if country else ""
+
+    # Отправляем пользователю сообщение с кнопкой ПОЛУЧИТЬ КОД
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                f"🎁 *ВАМ ВЫДАН АККАУНТ!*\n\n"
+                f"🌍 *Страна:* {flag} {name} ({code})\n"
+                f"📱 *ВАШ НОМЕР:* `{phone}`\n"
+                f"💰 {price_rub} ₽ / {price_stars}⭐\n\n"
+                f"---\n"
+                f"⚠️ *ПОСЛЕ ВХОДА В АККАУНТ ОБЯЗАТЕЛЬНО:*\n"
+                f"1️⃣ Смените номер телефона на свой\n"
+                f"2️⃣ Поставьте двухфакторную аутентификацию (2FA)\n"
+                f"3️⃣ Установите облачный пароль\n"
+                f"4️⃣ Привяжите почту для восстановления\n\n"
+                f"🔑 Нажмите кнопку, чтобы получить код для входа:"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [btn("🔑 ПОЛУЧИТЬ КОД", "get_code")],
+                [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
+            ])
+        )
+        await update.message.reply_text(
+            f"✅ *АККАУНТ ВОЗМЕЩЁН!*\n\n"
+            f"👤 Пользователь: `{target_user_id}`\n"
+            f"📱 Номер: `{phone}`\n"
+            f"🌍 {flag} {name}\n\n"
+            f"🎁 Номер отправлен пользователю с кнопкой «ПОЛУЧИТЬ КОД».",
+            parse_mode="Markdown",
+            reply_markup=back("admin_panel")
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки возмещения: {e}")
+        await update.message.reply_text(
+            f"❌ *НЕ УДАЛОСЬ ОТПРАВИТЬ АККАУНТ*\n\n"
+            f"Пользователь `{target_user_id}` не найден или бот заблокирован.\n\n"
+            f"Номер `{phone}` удалён из магазина.",
+            parse_mode="Markdown",
+            reply_markup=back("admin_panel")
+        )
+
     return ConversationHandler.END
 
 
@@ -3768,6 +4008,13 @@ async def run_app():
         fallbacks=[CommandHandler("start", start)]
     )
 
+    # ConversationHandler для возмещения аккаунта (ВОЗМЕЩЕНИЕ)
+    compensate_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(compensate_start, pattern="^compensate$")],
+        states={COMPENSATE_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, compensate_confirm)]},
+        fallbacks=[CommandHandler("start", start)]
+    )
+
     # === РЕГИСТРАЦИЯ ВСЕХ ОБРАБОТЧИКОВ ===
     app.add_handler(add_admin_conv)
     app.add_handler(add_phone_conv)
@@ -3775,6 +4022,7 @@ async def run_app():
     app.add_handler(edit_stars_conv)
     app.add_handler(offer_conv)
     app.add_handler(change_lzt_token_conv)
+    app.add_handler(compensate_conv)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(start_callback, pattern="^start$"))
@@ -3787,6 +4035,8 @@ async def run_app():
     app.add_handler(CallbackQueryHandler(reject_offer, pattern="^reject_offer:\d+$"))
     app.add_handler(CallbackQueryHandler(support, pattern="^support$"))
     app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
+    app.add_handler(CallbackQueryHandler(show_queue_callback, pattern="^show_queue$"))
+    app.add_handler(CallbackQueryHandler(release_all_queue_callback, pattern="^release_all_queue$"))
     app.add_handler(CallbackQueryHandler(remove_admin, pattern="^remove_admin$"))
     app.add_handler(CallbackQueryHandler(remove_admin_confirm, pattern="^remove_admin_\d+$"))
     app.add_handler(CallbackQueryHandler(list_admins, pattern="^list_admins$"))
