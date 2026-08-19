@@ -327,6 +327,20 @@ def delete_phone_product(product_id):
         return False
 
 
+def update_phone_prices(phone, price_rub, price_stars):
+    """Обновляет цены номера в БД (для очереди и магазина)"""
+    try:
+        conn = sqlite3.connect(DB_NAME, timeout=10)
+        conn.execute("UPDATE phone_products SET price_rub=?, price_stars=? WHERE phone=?",
+                     (price_rub, price_stars, phone))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка обновления цен для {phone}: {e}")
+        return False
+
+
 def save_phone_session(phone, session):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
@@ -1405,7 +1419,7 @@ async def show_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     queued = get_queued_phone_products()
     if not queued:
         await query.edit_message_text(
-            "🗃️ *ОЧЕРЕДЬ НА ДОБАВЛЕНИЕ*\n\n✅ Очередь пуста!\n\nНомеров, ожидающих 24ч+1мин, нет.",
+            "🗃️ ОЧЕРЕДЬ НА ДОБАВЛЕНИ*\n\n✅ Очередь пуста!\n\nНомеров, ожидающих 24ч+1мин, нет.",
             parse_mode="Markdown",
             reply_markup=back("admin_panel")
         )
@@ -1709,6 +1723,7 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if session_string:
             save_phone_session(phone, session_string)
+            update_phone_prices(phone, price_rub, price_stars)
 
         country_code = get_country_by_phone(phone)
         country = get_country_by_code(country_code)
@@ -1784,6 +1799,7 @@ async def add_phone_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if session_string:
             save_phone_session(phone, session_string)
+            update_phone_prices(phone, price_rub, price_stars)
 
         country_code = get_country_by_phone(phone)
         country = get_country_by_code(country_code)
@@ -3590,6 +3606,7 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
 
                 if new_session:
                     save_phone_session(phone, new_session)
+                    update_phone_prices(phone, price_rub_shop, price_stars_shop)
                     session_saved = True
                     queue_text = (
                         f"🔒 <b>Новая сессия создана!</b>\n"
@@ -3602,6 +3619,7 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
                     old_session = _lzt_extract_session(login_data)
                     if old_session and await _lzt_verify_existing_session(old_session):
                         save_phone_session(phone, old_session)
+                        update_phone_prices(phone, price_rub_shop, price_stars_shop)
                         session_saved = True
                         safe_status = html.escape(str(status))
                         queue_text = (
@@ -3785,6 +3803,7 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
 
                 if new_session:
                     save_phone_session(phone, new_session)
+                    update_phone_prices(phone, price_rub_shop, price_stars_shop)
                     session_saved = True
                     queue_text = (
                         f"🔒 <b>Новая сессия создана!</b>\n"
@@ -3797,6 +3816,7 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
                     old_session = _lzt_extract_session(login_data)
                     if old_session and await _lzt_verify_existing_session(old_session):
                         save_phone_session(phone, old_session)
+                        update_phone_prices(phone, price_rub_shop, price_stars_shop)
                         session_saved = True
                         safe_status = html.escape(str(status))
                         queue_text = (
