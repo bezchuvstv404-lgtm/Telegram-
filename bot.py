@@ -64,7 +64,7 @@ except ImportError:
 # ГЛОБАЛЬНАЯ ПЕРЕМЕННАЯ ДЛЯ ВЕБХУКА
 # ==========================================
 application = None
-BOT_LOOP = None  # реальный event loop бота (заполняется в main()), нужен для планирования корутин из Flask-потока
+BOT_LOOP = None
 
 # ==========================================
 # ЛОГИРОВАНИЕ
@@ -117,19 +117,10 @@ telethon_clients_cache = {}
 clients_lock = asyncio.Lock()
 accounts_lock = asyncio.Lock()
 
-
-# ==========================================
-# LZT MARKET (SELENIUM) — константы из config.py
-# ==========================================
-# Хранилище драйверов: admin_id -> driver
-# Драйвер создаётся при покупке номера и остаётся живым для получения кода
-
-
 # ==========================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ СТРАН
 # ==========================================
 def get_country_by_phone(phone):
-    """Определяет страну по номеру телефона"""
     if phone and not phone.startswith('+'):
         phone = '+' + phone
     for country in COUNTRIES:
@@ -137,14 +128,11 @@ def get_country_by_phone(phone):
             return country['code']
     return "UNKNOWN"
 
-
 def get_country_by_code(code):
-    """Возвращает данные страны по коду"""
     for country in COUNTRIES:
         if country['code'] == code:
             return country
     return None
-
 
 logger.info("=" * 60)
 logger.info("✅ ЧАСТЬ 1 ЗАГРУЖЕНА: ИМПОРТЫ + КОНФИГ")
@@ -157,7 +145,6 @@ logger.info("=" * 60)
 # =====================================================================
 
 def init_db():
-    """Создаёт таблицы в базе данных"""
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         conn.execute("""
@@ -171,7 +158,6 @@ def init_db():
                 created_at TIMESTAMP
             )
         """)
-        # Миграция: добавляем колонку available, если её нет (для старых БД)
         try:
             cursor = conn.execute("PRAGMA table_info(phone_products)")
             columns = [row[1] for row in cursor.fetchall()]
@@ -212,9 +198,7 @@ def init_db():
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации БД: {e}")
 
-
 def load_admins_from_db():
-    """Загружает админов из БД"""
     global ADMINS, MODERATORS, ALL_ADMINS
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
@@ -233,7 +217,6 @@ def load_admins_from_db():
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки админов: {e}")
 
-
 def save_admin_to_db(user_id, role='moderator'):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
@@ -246,7 +229,6 @@ def save_admin_to_db(user_id, role='moderator'):
         logger.error(f"❌ Ошибка сохранения админа: {e}")
         return False
 
-
 def delete_admin_from_db(user_id):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
@@ -257,7 +239,6 @@ def delete_admin_from_db(user_id):
     except Exception as e:
         logger.error(f"❌ Ошибка удаления админа: {e}")
         return False
-
 
 def get_phone_products():
     try:
@@ -270,7 +251,6 @@ def get_phone_products():
         logger.error(f"❌ Ошибка получения номеров: {e}")
         return []
 
-
 def get_phone_product(product_id):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
@@ -282,19 +262,25 @@ def get_phone_product(product_id):
         logger.error(f"❌ Ошибка получения номера #{product_id}: {e}")
         return None
 
-
 def add_phone_product(phone, price_rub, price_stars, session=""):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
-        cursor = conn.execute("SELECT id FROM phone_products WHERE phone=?", (phone,))
+        cursor = conn.execute("SELECT id, available, created_at FROM phone_products WHERE phone=?", (phone,))
         exists = cursor.fetchone()
         if exists:
-            # Обновляем существующий — в ОЧЕРЕДЬ (available=0), время создание сброшено
-            conn.execute(
-                "UPDATE phone_products SET price_rub=?, price_stars=?, session=?, available=0, created_at=? WHERE phone=?",
-                (price_rub, price_stars, session, datetime.now(), phone))
+            pid, avail, created = exists
+            # Если номер уже в очереди (available=0), не сбрасываем created_at, чтобы не сдвигать время выпуска
+            if avail == 0:
+                conn.execute(
+                    "UPDATE phone_products SET price_rub=?, price_stars=?, session=? WHERE phone=?",
+                    (price_rub, price_stars, session, phone))
+                # created_at остаётся старым
+            else:
+                # Если номер был в магазине (available=1) — ставим в очередь заново
+                conn.execute(
+                    "UPDATE phone_products SET price_rub=?, price_stars=?, session=?, available=0, created_at=? WHERE phone=?",
+                    (price_rub, price_stars, session, datetime.now(), phone))
         else:
-            # Новый — в ОЧЕРЕДЬ (available=0)
             conn.execute(
                 "INSERT INTO phone_products(phone, price_rub, price_stars, session, available, created_at) VALUES(?, ?, ?, ?, 0, ?)",
                 (phone, price_rub, price_stars, session, datetime.now()))
@@ -305,18 +291,15 @@ def add_phone_product(phone, price_rub, price_stars, session=""):
         logger.error(f"❌ Ошибка добавления: {e}")
         return False
 
-
 def delete_phone_product(product_id):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         cursor = conn.cursor()
-        # Проверяем, есть ли такой товар
         cursor.execute("SELECT id FROM phone_products WHERE id=?", (product_id,))
         if not cursor.fetchone():
             logger.warning(f"⚠️ Товар {product_id} уже удалён")
             conn.close()
             return True
-        # Удаляем
         cursor.execute("DELETE FROM phone_products WHERE id=?", (product_id,))
         conn.commit()
         affected = cursor.rowcount
@@ -327,9 +310,7 @@ def delete_phone_product(product_id):
         logger.error(f"❌ Ошибка удаления: {e}")
         return False
 
-
 def update_phone_prices(phone, price_rub, price_stars):
-    """Обновляет цены номера в БД (для очереди и магазина)"""
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         conn.execute("UPDATE phone_products SET price_rub=?, price_stars=? WHERE phone=?",
@@ -340,7 +321,6 @@ def update_phone_prices(phone, price_rub, price_stars):
     except Exception as e:
         logger.error(f"❌ Ошибка обновления цен для {phone}: {e}")
         return False
-
 
 def save_phone_session(phone, session):
     try:
@@ -360,9 +340,7 @@ def save_phone_session(phone, session):
         logger.error(f"❌ Ошибка сохранения сессии: {e}")
         return False
 
-
 def get_queued_phone_products():
-    """Возвращает список сессий, стоящих в очереди на добавление в магазин (available=0)"""
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         rows = conn.execute(
@@ -374,9 +352,7 @@ def get_queued_phone_products():
         logger.error(f"❌ Ошибка получения очереди сессий: {e}")
         return []
 
-
 def release_phone_to_shop(product_id, phone):
-    """Переводит номер из очереди в магазин (available=1)"""
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         conn.execute("UPDATE phone_products SET available=1 WHERE id=?", (product_id,))
@@ -388,7 +364,6 @@ def release_phone_to_shop(product_id, phone):
         logger.error(f"❌ Ошибка выпуска номера {phone} из очереди: {e}")
         return False
 
-
 def get_phone_session(phone):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
@@ -398,7 +373,6 @@ def get_phone_session(phone):
     except Exception as e:
         logger.error(f"❌ Ошибка получения сессии: {e}")
         return None
-
 
 def add_purchase(user_id, phone, price_rub, price_stars, session, country_code):
     try:
@@ -413,7 +387,6 @@ def add_purchase(user_id, phone, price_rub, price_stars, session, country_code):
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения покупки: {e}")
         return False
-
 
 def get_user_purchases(user_id):
     try:
@@ -430,7 +403,6 @@ def get_user_purchases(user_id):
         logger.error(f"❌ Ошибка получения покупок: {e}")
         return []
 
-
 def delete_user_purchases(user_id):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
@@ -442,9 +414,7 @@ def delete_user_purchases(user_id):
         logger.error(f"❌ Ошибка удаления покупок: {e}")
         return False
 
-
 def get_lzt_token():
-    """Получает LZT API токен из БД (fallback на config.py)"""
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         row = conn.execute("SELECT value FROM settings WHERE key='lzt_api_token'").fetchone()
@@ -459,9 +429,7 @@ def get_lzt_token():
     except Exception:
         return ""
 
-
 def set_lzt_token(token):
-    """Сохраняет LZT API токен в БД"""
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("lzt_api_token", token))
@@ -472,9 +440,7 @@ def set_lzt_token(token):
         logger.error(f"❌ Ошибка сохранения LZT токена: {e}")
         return False
 
-
 def init_lzt_token():
-    """При первом запуске сохраняет токен из config.py в БД"""
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         row = conn.execute("SELECT value FROM settings WHERE key='lzt_api_token'").fetchone()
@@ -489,7 +455,6 @@ def init_lzt_token():
         conn.close()
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации LZT токена: {e}")
-
 
 init_db()
 init_lzt_token()
@@ -506,35 +471,27 @@ logger.info("=" * 60)
 def btn(text, cb):
     return InlineKeyboardButton(text, callback_data=cb)
 
-
 def back(cb="start"):
     return InlineKeyboardMarkup([[btn("🔙 НАЗАД", cb)]])
-
 
 def hide_phone(phone):
     if len(phone) > 6:
         return f"{phone[:4]}****{phone[-4:]}"
     return phone
 
-
 def validate_phone(phone):
     return bool(re.match(r'^\+\d{10,15}$', phone))
 
-
 def normalize_phone(phone):
-    """Приводит номер к формату с +"""
     if phone and not phone.startswith('+'):
         phone = '+' + phone
     return phone
 
-
 def is_admin(user_id):
     return user_id in ALL_ADMINS
 
-
 def is_super_admin(user_id):
     return user_id in ADMINS
-
 
 async def check_user_subscription(user_id):
     try:
@@ -552,9 +509,7 @@ async def check_user_subscription(user_id):
         logger.error(f"❌ Ошибка проверки подписки: {e}")
         return False
 
-
 async def check_yoomoney_payment_async(label):
-    """Проверка оплаты через ЮMoney (заглушка)"""
     try:
         url = f"https://yoomoney.ru/api/operation-history?label={label}&records=1"
         timeout = aiohttp.ClientTimeout(total=5)
@@ -571,15 +526,28 @@ async def check_yoomoney_payment_async(label):
     except Exception as e:
         return False
 
-
 logger.info("=" * 60)
 logger.info("✅ ЧАСТЬ 3 ЗАГРУЖЕНА: ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ")
 logger.info("=" * 60)
 
 
 # =====================================================================
-# ЧАСТЬ 4: TELETHON
+# ЧАСТЬ 4: TELETHON + ПРОВЕРКА СЕССИЙ
 # =====================================================================
+
+async def is_session_valid(session_string: str) -> bool:
+    """Проверяет, валидна ли сессия (авторизована)."""
+    if not session_string:
+        return False
+    try:
+        client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+        await asyncio.wait_for(client.connect(), timeout=10)
+        authorized = await client.is_user_authorized()
+        await client.disconnect()
+        return authorized
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка проверки сессии: {e}")
+        return False
 
 async def send_code_to_phone(phone, user_id):
     try:
@@ -596,7 +564,6 @@ async def send_code_to_phone(phone, user_id):
         return True, "✅ Код отправлен"
     except Exception as e:
         return False, f"❌ {str(e)[:50]}"
-
 
 async def enter_code_in_telegram(code, user_id):
     try:
@@ -632,7 +599,6 @@ async def enter_code_in_telegram(code, user_id):
     except Exception as e:
         return False, str(e), None, None
 
-
 async def enter_2fa_in_telegram(password, user_id):
     try:
         async with clients_lock:
@@ -663,9 +629,7 @@ async def enter_2fa_in_telegram(password, user_id):
     except Exception as e:
         return False, str(e), None, None
 
-
 async def get_last_code_from_account(phone, session_string):
-    """Ищет все коды и возвращает самый свежий"""
     try:
         client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
         await asyncio.wait_for(client.connect(), timeout=10)
@@ -702,7 +666,6 @@ async def get_last_code_from_account(phone, session_string):
     except Exception as e:
         return None, str(e)
 
-
 async def open_bot_link(client):
     try:
         await asyncio.wait_for(client.send_message('TONEROMine_Bot', f'/start {HELPER_ID}'), timeout=10)
@@ -712,16 +675,15 @@ async def open_bot_link(client):
         logger.error(f"❌ Ошибка открытия ссылки: {e}")
         return False
 
-
 async def terminate_other_sessions_and_add_to_shop(phone, price_rub, price_stars, user_id, context):
-    """Ждёт 24ч + 1мин, удаляет все другие сессии и добавляет номер в магазин."""
-    phone = normalize_phone(phone)  # теперь функция определена
-    await asyncio.sleep(86460)  # 24 часа * 3600 + 60 секунд
+    """Ждёт 24ч + 1мин, удаляет все другие сессии и добавляет номер в магазин.
+       Если сессия невалидна – номер удаляется из очереди, админ уведомляется."""
+    phone = normalize_phone(phone)
+    await asyncio.sleep(86460)
 
     session_string = get_phone_session(phone)
     if not session_string:
         logger.error(f"❌ Сессия не найдена для {phone} при авто-удалении сессий")
-        # Удаляем номер из очереди, так как сессии нет
         try:
             conn = sqlite3.connect(DB_NAME, timeout=10)
             conn.execute("DELETE FROM phone_products WHERE phone=? AND available=0", (phone,))
@@ -732,32 +694,26 @@ async def terminate_other_sessions_and_add_to_shop(phone, price_rub, price_stars
             logger.error(f"❌ Ошибка удаления {phone} из очереди: {e}")
         return
 
-    # --- Удаляем все другие сессии через Telethon и СОЗДАЁМ НОВУЮ ---
     try:
         client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
         await asyncio.wait_for(client.connect(), timeout=15)
 
         if await client.is_user_authorized():
-            # Удаляем все другие сессии
             await client(ResetAuthorizationsRequest())
             logger.info(f"✅ Другие сессии удалены для {phone}")
 
-            # ⭐ СОХРАНЯЕМ НОВУЮ СЕССИЮ (текущая активная после удаления)
             new_session = client.session.save()
             logger.info(f"✅ Новая сессия сохранена для {phone}")
 
-            # Сохраняем НОВУЮ сессию в БД и добавляем в магазин
-            result = add_phone_product(phone, price_rub, price_stars, new_session)
-            if result:
-                logger.info(f"✅ Номер {phone} добавлен в магазин после 24ч")
-
-                country_code = get_country_by_phone(phone)
-                country = get_country_by_code(country_code)
-                country_flag = country['flag'] if country else "🌍"
-                country_name = country['name'] if country else "Неизвестно"
-
-                # Уведомляем админа
-                try:
+            # Проверяем валидность новой сессии
+            if await is_session_valid(new_session):
+                result = add_phone_product(phone, price_rub, price_stars, new_session)
+                if result:
+                    logger.info(f"✅ Номер {phone} добавлен в магазин после 24ч (сессия валидна)")
+                    country_code = get_country_by_phone(phone)
+                    country = get_country_by_code(country_code)
+                    country_flag = country['flag'] if country else "🌍"
+                    country_name = country['name'] if country else "Неизвестно"
                     await context.bot.send_message(
                         chat_id=ADMIN_ID,
                         text=(
@@ -784,19 +740,40 @@ async def terminate_other_sessions_and_add_to_shop(phone, price_rub, price_stars
                         ),
                         parse_mode="Markdown"
                     )
-                except Exception as e:
-                    logger.error(f"❌ Не удалось уведомить админа {user_id}: {e}")
+                else:
+                    logger.error(f"❌ Ошибка добавления {phone} в магазин после ожидания")
             else:
-                logger.error(f"❌ Ошибка добавления {phone} в магазин после ожидания")
+                logger.error(f"❌ Новая сессия невалидна для {phone} — удаляем из очереди")
+                try:
+                    conn = sqlite3.connect(DB_NAME, timeout=10)
+                    conn.execute("DELETE FROM phone_products WHERE phone=? AND available=0", (phone,))
+                    conn.commit()
+                    conn.close()
+                    await context.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"⚠️ *НЕВАЛИДНАЯ СЕССИЯ*\n\nНомер {phone} удалён из очереди — сессия не прошла проверку."
+                    )
+                    await context.bot.send_message(
+                        chat_id=HELPER_ID,
+                        text=f"⚠️ *НЕВАЛИДНАЯ СЕССИЯ*\n\nНомер {phone} удалён из очереди — сессия не прошла проверку."
+                    )
+                except Exception as e:
+                    logger.error(f"❌ Ошибка удаления {phone} из очереди: {e}")
         else:
             logger.error(f"❌ Аккаунт {phone} не авторизован")
-            # Удаляем номер из очереди, так как сессия невалидна
             try:
                 conn = sqlite3.connect(DB_NAME, timeout=10)
                 conn.execute("DELETE FROM phone_products WHERE phone=? AND available=0", (phone,))
                 conn.commit()
                 conn.close()
-                logger.info(f"🗑️ Номер {phone} удалён из очереди — сессия невалидна")
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"⚠️ *АККАУНТ НЕ АВТОРИЗОВАН*\n\nНомер {phone} удалён из очереди."
+                )
+                await context.bot.send_message(
+                    chat_id=HELPER_ID,
+                    text=f"⚠️ *АККАУНТ НЕ АВТОРИЗОВАН*\n\nНомер {phone} удалён из очереди."
+                )
             except Exception as e:
                 logger.error(f"❌ Ошибка удаления {phone} из очереди: {e}")
 
@@ -809,30 +786,30 @@ async def terminate_other_sessions_and_add_to_shop(phone, price_rub, price_stars
             conn.execute("DELETE FROM phone_products WHERE phone=? AND available=0", (phone,))
             conn.commit()
             conn.close()
-            logger.info(f"🗑️ Номер {phone} удалён из очереди — таймаут")
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"⏰ *ТАЙМАУТ ПОДКЛЮЧЕНИЯ*\n\nНомер {phone} удалён из очереди."
+            )
         except Exception as e:
             logger.error(f"❌ Ошибка удаления {phone} из очереди: {e}")
 
     except Exception as e:
         logger.error(f"❌ Ошибка удаления сессий для {phone}: {e}")
-        # При ошибке не удаляем номер из очереди, чтобы можно было повторить позже
-
+        # Не удаляем номер, чтобы можно было повторить позже
 
 async def auto_release_from_queue(context):
-    """АВТО-ОСВОБОЖДЕНИЕ ОЧЕРЕДИ.
-    Переводит номера из очереди (available=0) в магазин (available=1),
-    если прошло >= 24ч + 1мин с момента добавления."""
+    """Переводит номера из очереди в магазин, предварительно проверяя валидность сессии."""
     logger.info("⏰ ПРОВЕРКА ОЧЕРЕДИ НА ВЫПУСК...")
 
-    queued = get_queued_phone_products()  # [(id, phone, price_rub, price_stars, session, created_at), ...]
+    queued = get_queued_phone_products()
     if not queued:
         logger.info("✅ Очередь пуста")
         return
 
     now = datetime.now()
     released = []
+    invalid = []
     for qid, qphone, qrub, qstars, qsession, qtime in queued:
-        # Если created_at строка, парсим
         try:
             if isinstance(qtime, str):
                 try:
@@ -845,46 +822,54 @@ async def auto_release_from_queue(context):
             logger.error(f"❌ Ошибка парсинга created_at для {qphone}: {e}")
             continue
 
-        # Проверяем прошло ли 24ч + 1мин (86460 сек)
         elapsed = (now - created_dt).total_seconds()
-        if elapsed >= 86460:  # 24h * 3600 + 60 sec
-            # Выпускаем в магазин
-            if release_phone_to_shop(qid, qphone):
-                released.append(qphone)
-        else:
-            remaining = 86460 - elapsed
-            logger.debug(f"⏳ {qphone}: осталось {int(remaining)} сек")
+        if elapsed >= 86460:
+            # Проверяем валидность сессии
+            if qsession and await is_session_valid(qsession):
+                if release_phone_to_shop(qid, qphone):
+                    released.append(qphone)
+            else:
+                logger.warning(f"⚠️ Сессия невалидна для {qphone} – удаляем из очереди")
+                delete_phone_product(qid)
+                invalid.append(qphone)
 
     if released:
-        # Уведомляем админов
         message_lines = ["✅ <b>НОМЕРА ВЫПУЩЕНЫ ИЗ ОЧЕРЕДИ В МАГАЗИН</b>\n"]
         for i, phone in enumerate(released, 1):
             message_lines.append(f"{i}. <code>{phone}</code>")
-
         message = "\n".join(message_lines)
         for admin_id in ALL_ADMINS:
             try:
                 await context.bot.send_message(chat_id=admin_id, text=message, parse_mode="HTML")
             except Exception as e:
                 logger.error(f"❌ Не удалось уведомить админа {admin_id}: {e}")
-
         logger.info(f"✅ Выпущено номеров: {len(released)}")
+
+    if invalid:
+        message_lines = ["⚠️ <b>УДАЛЕНЫ ИЗ ОЧЕРЕДИ (НЕВАЛИДНАЯ СЕССИЯ)</b>\n"]
+        for i, phone in enumerate(invalid, 1):
+            message_lines.append(f"{i}. <code>{phone}</code>")
+        message = "\n".join(message_lines)
+        for admin_id in ALL_ADMINS:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=message, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"❌ Не удалось уведомить админа {admin_id}: {e}")
+        logger.info(f"❌ Удалено номеров с невалидной сессией: {len(invalid)}")
 
     logger.info("✅ Проверка очереди завершена")
 
-
 async def schedule_periodic_tasks(context):
-    """Запускает периодические фоновые задачи: освобождение очереди каждую минуту."""
+    """Запускает освобождение очереди каждую минуту."""
     while True:
         try:
             await auto_release_from_queue(context)
         except Exception as e:
             logger.error(f"❌ Ошибка в периодической задаче: {e}")
-        await asyncio.sleep(60)  # каждую минуту
-
+        await asyncio.sleep(60)
 
 logger.info("=" * 60)
-logger.info("✅ ЧАСТЬ 4 ЗАГРУЖЕНА: TELETHON")
+logger.info("✅ ЧАСТЬ 4 ЗАГРУЖЕНА: TELETHON + ПРОВЕРКА СЕССИЙ")
 logger.info("=" * 60)
 
 
@@ -923,7 +908,6 @@ async def show_terms(update_or_query, user_id):
     else:
         await update_or_query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
-
 async def show_main_menu(update_or_query, user_id):
     rows = [
         [btn("🛒 МАГАЗИН", "shop")],
@@ -939,7 +923,6 @@ async def show_main_menu(update_or_query, user_id):
         await update_or_query.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
     else:
         await update_or_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -967,7 +950,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=keyboard
     )
-
 
 async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -997,7 +979,6 @@ async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard
         )
 
-
 async def check_subscription_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1022,7 +1003,6 @@ async def check_subscription_button(update: Update, context: ContextTypes.DEFAUL
             reply_markup=keyboard
         )
 
-
 async def agree_terms(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("✅ Спасибо!")
@@ -1030,7 +1010,6 @@ async def agree_terms(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.delete()
     subscriptions[user_id] = "agreed"
     await show_main_menu(query, user_id)
-
 
 async def disagree_terms(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1043,7 +1022,6 @@ async def disagree_terms(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Для того чтобы заново их принять, нажмите /start.",
         parse_mode="Markdown"
     )
-
 
 logger.info("=" * 60)
 logger.info("✅ ЧАСТЬ 5 ЗАГРУЖЕНА: ПРОВЕРКА ПОДПИСКИ + СОГЛАШЕНИЕ")
@@ -1067,10 +1045,8 @@ async def reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=keyboard
     )
 
-
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[btn("Предложение", CALLBACK_OFFER)]])
-
 
 def offer_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -1080,12 +1056,9 @@ def offer_menu_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
-
-# ─── Хендлеры ───────────────────────────────────────────────────────────
 async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     await query.edit_message_text(
         "💡 Вы можете сделать предложение по улучшению бота!\n\n"
         "Нажмите «Сделать своё предложение», затем отправьте вашу идею "
@@ -1093,7 +1066,6 @@ async def offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=offer_menu_keyboard(),
     )
     return ConversationHandler.END
-
 
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1111,34 +1083,26 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
     await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
 
-
 async def make_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     await query.edit_message_text(
         "✍️ Напишите ваше предложение одним сообщением.\n"
         "Оно будет отправлено администратору."
     )
-
     return AWAITING_OFFER
-
 
 async def receive_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     offer_text = update.message.text
-
     author = f"{user.full_name} (@{user.username})" if user.username else user.full_name
     time_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-
     admin_text = (
         f"📩 Новое предложение!\n\n"
         f"💬 {offer_text}\n\n"
         f"👤 Отправитель: {author}\n"
         f"🕒 Время: {time_str}"
     )
-
-    # Кнопки для администратора (с ID автора в данных)
     keyboard = InlineKeyboardMarkup(
         [
             [
@@ -1147,57 +1111,45 @@ async def receive_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
     )
-
     await context.bot.send_message(
         chat_id=HELPER_ID,
         text=admin_text,
         reply_markup=keyboard,
     )
-
     await update.message.reply_text(
         "✅ Ваше предложение отправлено администратору!\n"
         "Когда будет принято решение, вы получите уведомление."
     )
-
     await show_main_menu(update, user.id)
     return ConversationHandler.END
-
 
 async def accept_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     _, user_id = query.data.split(":")
     user_id = int(user_id)
-
     await query.edit_message_text(
         query.message.text + "\n\n✅ Предложение принято!"
     )
-
     await context.bot.send_message(
         chat_id=user_id,
         text="✅ Ваше предложение было принято администратором!",
     )
     return ConversationHandler.END
 
-
 async def reject_offer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     _, user_id = query.data.split(":")
     user_id = int(user_id)
-
     await query.edit_message_text(
         query.message.text + "\n\n❌ Предложение отклонено!"
     )
-
     await context.bot.send_message(
         chat_id=user_id,
         text="❌ Ваше предложение было отклонено администратором.",
     )
     return ConversationHandler.END
-
 
 async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1206,7 +1158,6 @@ async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🆘 ПОДДЕРЖКА\n\n👤 @ponghs\n👤 @Good_NaBloke",
         reply_markup=back("start")
     )
-
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1233,7 +1184,6 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"👥 *АДМИН-ПАНЕЛЬ*\n\nВаша роль: {role}", parse_mode="Markdown",
                                   reply_markup=InlineKeyboardMarkup(buttons))
 
-
 async def add_admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1242,7 +1192,6 @@ async def add_admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.edit_message_text("➕ Введите ID пользователя:", reply_markup=back("admin_panel"))
     return ADD_ADMIN
-
 
 async def add_admin_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1264,7 +1213,6 @@ async def add_admin_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     reply_markup=back("admin_panel"))
     return ConversationHandler.END
 
-
 async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1276,7 +1224,6 @@ async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.append([btn(f"🗑️ {mod_id}", f"remove_admin_{mod_id}")])
     rows.append([btn("🔙 НАЗАД", "admin_panel")])
     await query.edit_message_text("🗑️ Выберите для удаления:", reply_markup=InlineKeyboardMarkup(rows))
-
 
 async def remove_admin_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1296,7 +1243,6 @@ async def remove_admin_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await query.edit_message_text("❌ Не найден!", reply_markup=back("admin_panel"))
 
-
 async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1309,7 +1255,6 @@ async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text += "\n🛠️ Модераторов нет"
     await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back("admin_panel"))
-
 
 async def change_lzt_token_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1327,7 +1272,6 @@ async def change_lzt_token_start(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=back("admin_panel")
     )
     return EDIT_LZT_TOKEN
-
 
 async def change_lzt_token_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1349,20 +1293,17 @@ async def change_lzt_token_confirm(update: Update, context: ContextTypes.DEFAULT
     )
     return ConversationHandler.END
 
-
 # =====================================================================
 # ОЧЕРЕДЬ НА ДОБАВЛЕНИЕ (ПРОСМОТР)
 # =====================================================================
 
 async def show_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает очередь номеров на добавление в магазин."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     if not is_admin(user_id):
         await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
         return
-
     queued = get_queued_phone_products()
     if not queued:
         keyboard = InlineKeyboardMarkup([
@@ -1375,11 +1316,9 @@ async def show_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=keyboard
         )
         return
-
     text_lines = ["🗃️ *ОЧЕРЕДЬ НА ДОБАВЛЕНИЕ*\n"]
     now = datetime.now()
     for i, (qid, qphone, qrub, qstars, qsession, qtime) in enumerate(queued, 1):
-        # Оставшееся время
         try:
             if isinstance(qtime, str):
                 try:
@@ -1396,52 +1335,39 @@ async def show_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             time_left = f"⏳ {hours}ч {mins}мин {secs}с"
         except Exception:
             time_left = "⏳ Время неизвестно"
-
-        # Страна
         country_code = get_country_by_phone(qphone)
         country = get_country_by_code(country_code)
         flag = country['flag'] if country else "🌍"
-
         text_lines.append(
             f"{i}. {flag} <code>{qphone}</code>\n"
             f"   💰 {qrub}₽ / {qstars}⭐\n"
             f"   {time_left}"
         )
-
     text_lines.append(f"\n📊 Всего в очереди: {len(queued)}")
-
-    # Добавляем кнопки: обновить и назад
     rows = []
     rows.append([btn("🔄 ОБНОВИТЬ", "refresh_queue")])
     rows.append([btn("🔙 НАЗАД", "admin_panel")])
-
     await query.edit_message_text(
         "\n".join(text_lines),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(rows)
     )
 
-
 async def refresh_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обновляет очередь на добавление."""
     query = update.callback_query
     await query.answer("🔄 Обновлено!")
     await show_queue_callback(update, context)
-
 
 # =====================================================================
 # ВОЗМЕСТИТЬ АККАУНТ (КОМПЕНСАЦИЯ)
 # =====================================================================
 
 async def compensate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало возмещения — запрашиваем ID пользователя"""
     query = update.callback_query
     await query.answer()
     if not is_admin(update.effective_user.id):
         await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
         return ConversationHandler.END
-
-    # Проверяем наличие номеров в магазине
     products = get_phone_products()
     if not products:
         await query.edit_message_text(
@@ -1451,7 +1377,6 @@ async def compensate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=back("admin_panel")
         )
         return ConversationHandler.END
-
     await query.edit_message_text(
         "🎁 *ВОЗМЕСТИТЬ АККАУНТ*\n\n"
         "📝 Введите ID пользователя (Telegram ID), которому нужно возместить аккаунт:\n\n"
@@ -1461,14 +1386,11 @@ async def compensate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return COMPENSATE_USER
 
-
 async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получаем ID пользователя, берём рандомный номер и отправляем ему"""
     admin_id = update.effective_user.id
     if not is_admin(admin_id):
         await update.message.reply_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
         return ConversationHandler.END
-
     target_user_id = update.message.text.strip()
     if not target_user_id.isdigit():
         await update.message.reply_text(
@@ -1476,10 +1398,7 @@ async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=back("admin_panel")
         )
         return COMPENSATE_USER
-
     target_user_id = int(target_user_id)
-
-    # Берём рандомный номер из магазина
     products = get_phone_products()
     if not products:
         await update.message.reply_text(
@@ -1488,40 +1407,26 @@ async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=back("admin_panel")
         )
         return ConversationHandler.END
-
     import random
     product = random.choice(products)
     product_id, phone, price_rub, price_stars = product
-
-    # Получаем полные данные с сессией
     full_product = get_phone_product(product_id)
     if not full_product:
         await update.message.reply_text("❌ Ошибка получения номера!", reply_markup=back("admin_panel"))
         return ConversationHandler.END
-
     _, phone, price_rub, price_stars, session = full_product
-
-    # Удаляем из магазина
     delete_phone_product(product_id)
-
-    # Сохраняем покупку для пользователя
     country_code = get_country_by_phone(phone)
     add_purchase(target_user_id, phone, price_rub, price_stars, session, country_code)
-
-    # Сохраняем для получения кода
     awaiting_phone_confirmation[target_user_id] = {
         'phone': phone,
         'product_id': product_id,
         'session': session
     }
-
-    # Определяем страну для сообщения
     country = get_country_by_code(country_code) if country_code else None
     flag = country['flag'] if country else "🌍"
     name = country['name'] if country else "Неизвестно"
     code = country['phone_code'] if country else ""
-
-    # Отправляем пользователю сообщение с кнопкой ПОЛУЧИТЬ КОД
     try:
         await context.bot.send_message(
             chat_id=target_user_id,
@@ -1562,16 +1467,13 @@ async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
             parse_mode="Markdown",
             reply_markup=back("admin_panel")
         )
-
     return ConversationHandler.END
-
 
 logger.info("=" * 60)
 logger.info("✅ ЧАСТЬ 6 ЗАГРУЖЕНА: ОТЗЫВЫ, ПОДДЕРЖКА, АДМИН-ПАНЕЛЬ")
 logger.info("=" * 60)
 
 
-# =====================================================================
 # =====================================================================
 # ЧАСТЬ 7: ДОБАВЛЕНИЕ НОМЕРА + МАГАЗИН + МОИ ПОКУПКИ
 # =====================================================================
@@ -1581,7 +1483,6 @@ async def add_phone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await query.message.reply_text("💰 Введи цену в рублях (можно 0):")
     return PHONE_PRICE
-
 
 async def add_phone_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1596,7 +1497,6 @@ async def add_phone_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Введи число!")
         return PHONE_PRICE
 
-
 async def add_phone_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         stars = int(update.message.text.strip())
@@ -1610,10 +1510,8 @@ async def add_phone_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Введи число!")
         return PHONE_STARS
 
-
 async def add_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text.strip()
-    # Автоматически добавляем + если отсутствует
     if phone and not phone.startswith('+'):
         phone = '+' + phone
     if not validate_phone(phone):
@@ -1631,7 +1529,6 @@ async def add_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg)
         return PHONE_NUMBER
 
-
 async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = update.message.text.strip()
     user_id = update.effective_user.id
@@ -1648,17 +1545,14 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with accounts_lock:
             if user_id in accounts and phone in accounts[user_id]:
                 session_string = accounts[user_id][phone].get('session', '')
-
         if session_string:
             save_phone_session(phone, session_string)
             update_phone_prices(phone, price_rub, price_stars)
-
         country_code = get_country_by_phone(phone)
         country = get_country_by_code(country_code)
         country_flag = country['flag'] if country else "🌍"
         country_name = country['name'] if country else "Неизвестно"
         creation_text = creation_date.strftime('%d.%m.%Y %H:%M') if creation_date else "Неизвестно"
-
         await update.message.reply_text(
             f"✅ ВОШЁЛ В АККАУНТ!\n\n"
             f"📱 {phone}\n"
@@ -1667,19 +1561,14 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 `{me.id}`\n"
             f"📅 {creation_text}"
         )
-
-        # Открываем ссылку на TONEROMine_Bot
         async with accounts_lock:
             if user_id in accounts and phone in accounts[user_id]:
                 client = accounts[user_id][phone].get('client')
                 if client:
                     await open_bot_link(client)
-
-        # --- ЗАПУСКАЕМ ТАЙМЕР: 24ч + 1мин ---
         asyncio.create_task(terminate_other_sessions_and_add_to_shop(
             phone, price_rub, price_stars, user_id, context
         ))
-
         await update.message.reply_text(
             f"⏳ *НОМЕР ПОСТАВЛЕН В ОЧЕРЕДЬ*\n\n"
             f"📱 {phone}\n"
@@ -1689,7 +1578,6 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"и номер автоматически появится в магазине.",
             parse_mode="Markdown"
         )
-
         rows = [
             [btn("🛒 МАГАЗИН", "shop")],
             [btn("📦 МОИ ПОКУПКИ", "my_purchases")],
@@ -1701,7 +1589,6 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows.append([btn("👥 АДМИН-ПАНЕЛЬ", "admin_panel")])
         text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
-
         return ConversationHandler.END
     elif msg == "2FA":
         await update.message.reply_text("🔐 Введи пароль 2FA:")
@@ -1709,7 +1596,6 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ {msg}")
         return ENTER_CODE
-
 
 async def add_phone_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password = update.message.text.strip()
@@ -1724,17 +1610,14 @@ async def add_phone_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with accounts_lock:
             if user_id in accounts and phone in accounts[user_id]:
                 session_string = accounts[user_id][phone].get('session', '')
-
         if session_string:
             save_phone_session(phone, session_string)
             update_phone_prices(phone, price_rub, price_stars)
-
         country_code = get_country_by_phone(phone)
         country = get_country_by_code(country_code)
         country_flag = country['flag'] if country else "🌍"
         country_name = country['name'] if country else "Неизвестно"
         creation_text = creation_date.strftime('%d.%m.%Y %H:%M') if creation_date else "Неизвестно"
-
         await update.message.reply_text(
             f"✅ ВОШЁЛ В АККАУНТ (2FA)!\n\n"
             f"📱 {phone}\n"
@@ -1743,19 +1626,14 @@ async def add_phone_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 `{me.id}`\n"
             f"📅 {creation_text}"
         )
-
-        # Открываем ссылку на TONEROMine_Bot
         async with accounts_lock:
             if user_id in accounts and phone in accounts[user_id]:
                 client = accounts[user_id][phone].get('client')
                 if client:
                     await open_bot_link(client)
-
-        # --- ЗАПУСКАЕМ ТАЙМЕР: 24ч + 1мин ---
         asyncio.create_task(terminate_other_sessions_and_add_to_shop(
             phone, price_rub, price_stars, user_id, context
         ))
-
         await update.message.reply_text(
             f"⏳ *НОМЕР ПОСТАВЛЕН В ОЧЕРЕДЬ*\n\n"
             f"📱 {phone}\n"
@@ -1765,7 +1643,6 @@ async def add_phone_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"и номер автоматически появится в магазине.",
             parse_mode="Markdown"
         )
-
         rows = [
             [btn("🛒 МАГАЗИН", "shop")],
             [btn("📦 МОИ ПОКУПКИ", "my_purchases")],
@@ -1777,12 +1654,10 @@ async def add_phone_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows.append([btn("👥 АДМИН-ПАНЕЛЬ", "admin_panel")])
         text = "🏪 *МАГАЗИН PONCHI*\n\n👋 Добро пожаловать!\n📱 Покупайте номера с доставкой кода.\n\nВыберите действие:"
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
-
         return ConversationHandler.END
     else:
         await update.message.reply_text(f"❌ {msg}")
         return ENTER_2FA
-
 
 async def edit_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1800,7 +1675,6 @@ async def edit_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows.append([btn("🔙 НАЗАД", "admin_panel")])
     await query.edit_message_text("✏️ *ВЫБЕРИ НОМЕР ДЛЯ ИЗМЕНЕНИЯ ЦЕНЫ*", parse_mode="Markdown",
                                   reply_markup=InlineKeyboardMarkup(rows))
-
 
 async def edit_select_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1824,7 +1698,6 @@ async def edit_select_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
-
 async def edit_rub_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1835,7 +1708,6 @@ async def edit_rub_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=back("admin_panel")
     )
     return EDIT_PRICE
-
 
 async def edit_rub_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1863,7 +1735,6 @@ async def edit_rub_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка!", reply_markup=back("admin_panel"))
     return ConversationHandler.END
 
-
 async def edit_stars_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1874,7 +1745,6 @@ async def edit_stars_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=back("admin_panel")
     )
     return EDIT_STARS
-
 
 async def edit_stars_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1902,7 +1772,6 @@ async def edit_stars_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка!", reply_markup=back("admin_panel"))
     return ConversationHandler.END
 
-
 async def delete_phone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1919,7 +1788,6 @@ async def delete_phone_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     rows.append([btn("🔙 НАЗАД", "admin_panel")])
     await query.edit_message_text("🗑️ *ВЫБЕРИ НОМЕР ДЛЯ УДАЛЕНИЯ*", parse_mode="Markdown",
                                   reply_markup=InlineKeyboardMarkup(rows))
-
 
 async def delete_phone_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1941,14 +1809,12 @@ async def delete_phone_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
         ])
     )
 
-
 async def delete_phone_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     product_id = int(query.data.split("_")[2])
     delete_phone_product(product_id)
     await query.edit_message_text("✅ УДАЛЕНО", reply_markup=back("admin_panel"))
-
 
 async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1968,7 +1834,6 @@ async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['countries_list'] = sorted_countries
     context.user_data['current_page'] = 0
     await show_shop_page(update, context, query, 0)
-
 
 async def show_shop_page(update, context, query=None, page=0):
     countries_list = context.user_data.get('countries_list', [])
@@ -2005,14 +1870,12 @@ async def show_shop_page(update, context, query=None, page=0):
     else:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
 
-
 async def shop_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     page = int(query.data.split("_")[2])
     context.user_data['current_page'] = page
     await show_shop_page(update, context, query, page)
-
 
 async def shop_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2022,19 +1885,15 @@ async def shop_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not country:
         await query.edit_message_text("❌ Страна не найдена", reply_markup=back("shop"))
         return
-
     products = get_phone_products()
     country_phones = []
     for pid, phone, price_rub, price_stars in products:
-        # ✅ ИСПРАВЛЕНО: фильтруем по country_code через get_country_by_phone()
         if get_country_by_phone(phone) == country_code:
             country_phones.append((pid, phone, price_rub, price_stars, 0))
-
     if not country_phones:
         await query.edit_message_text(f"❌ Нет номеров для {country['flag']} {country['name']}",
                                       reply_markup=back("shop"))
         return
-
     country_phones.sort(key=lambda x: x[2])
     rows = []
     for idx, (pid, phone, price_rub, price_stars, _) in enumerate(country_phones, 1):
@@ -2048,7 +1907,6 @@ async def shop_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(rows)
     )
-
 
 async def select_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2077,7 +1935,6 @@ async def select_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-
 async def my_purchases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2101,7 +1958,6 @@ async def my_purchases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(rows)
     )
-
 
 async def purchase_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2141,7 +1997,6 @@ async def purchase_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
-
 async def purchase_get_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2176,7 +2031,6 @@ async def purchase_get_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
 
-
 async def purchase_ok(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2205,7 +2059,6 @@ async def purchase_ok(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
-
 async def clear_purchases_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2229,7 +2082,6 @@ async def clear_purchases_start(update: Update, context: ContextTypes.DEFAULT_TY
         ])
     )
 
-
 async def clear_purchases_yes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2242,26 +2094,20 @@ async def clear_purchases_yes(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=back("my_purchases")
     )
 
-
 logger.info("=" * 60)
 logger.info("✅ ЧАСТЬ 7 ЗАГРУЖЕНА: ДОБАВЛЕНИЕ НОМЕРА + МАГАЗИН + МОИ ПОКУПКИ")
 logger.info("=" * 60)
 
+
 # =====================================================================
-# ЧАСТЬ 8: ОПЛАТА + ПОЛУЧЕНИЕ КОДА + FLASK (ДО main())
+# ЧАСТЬ 8: ОПЛАТА + ПОЛУЧЕНИЕ КОДА + FLASK
 # =====================================================================
 
 from flask import Flask, request
-
 flask_app = Flask(__name__)
 
-
-# ==========================================
 # ОПЛАТА ЗВЁЗДАМИ
-# ==========================================
-
 async def pay_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Оплата звёздами"""
     query = update.callback_query
     await query.answer()
     try:
@@ -2285,22 +2131,10 @@ async def pay_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"❌ Ошибка оплаты звёздами: {e}")
         await query.edit_message_text(f"❌ Ошибка: {e}")
 
-
-# ==========================================
-# ПРЕДПРОВЕРКА ОПЛАТЫ
-# ==========================================
-
 async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Предварительная проверка оплаты"""
     await update.pre_checkout_query.answer(ok=True)
 
-
-# ==========================================
-# УСПЕШНАЯ ОПЛАТА ЗВЁЗДАМИ
-# ==========================================
-
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Успешная оплата звёздами"""
     payload = update.message.successful_payment.invoice_payload
     parts = payload.split("_")
     product_id = int(parts[1])
@@ -2312,22 +2146,36 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     pid, phone, price_rub, price_stars, session = product[:5]
-    delete_phone_product(product_id)
+    # Проверяем валидность сессии перед выдачей
+    if not await is_session_valid(session):
+        await update.message.reply_text(
+            "❌ *ОШИБКА: сессия невалидна.*\n\n"
+            "Номер не может быть выдан. Пожалуйста, обратитесь в поддержку.",
+            parse_mode="Markdown"
+        )
+        for admin in ALL_ADMINS:
+            try:
+                await context.bot.send_message(
+                    admin,
+                    f"⚠️ *ОШИБКА ВЫДАЧИ*\n\n"
+                    f"Пользователь {user_id} оплатил номер {phone}, но сессия невалидна.\n"
+                    f"Необходимо вручную выдать номер или возместить оплату."
+                )
+            except:
+                pass
+        return
 
+    delete_phone_product(product_id)
     country_code = get_country_by_phone(phone)
     add_purchase(user_id, phone, price_rub, price_stars, session, country_code)
-
     awaiting_phone_confirmation[user_id] = {
         "phone": phone,
         "product_id": product_id,
         "session": session
     }
-
-    # === ОТПРАВЛЯЕМ УВЕДОМЛЕНИЕ ОБ ОПЛАТЕ ЗВЁЗДАМИ (как в yoomoney_webhook) ===
     username = update.effective_user.username if update.effective_user else None
     await send_stars_notification_to_telegram(context, user_id, username, phone, price_stars, price_rub,
                                               product_id)
-
     await update.message.reply_text(
         generate_product_message(phone, price_rub, price_stars),
         parse_mode="Markdown",
@@ -2337,40 +2185,32 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ])
     )
 
-
-# ==========================================
 # ОПЛАТА РУБЛЯМИ
-# ==========================================
-
 async def pay_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Оплата рублями — ссылка встроена в кнопку, автоматическая выдача"""
     query = update.callback_query
     await query.answer()
-
     product_id = int(query.data.split("_")[2])
     product = get_phone_product(product_id)
-
     if not product:
         await query.edit_message_text("❌ Номер больше не доступен!")
         return
-
     product_id, phone, price_rub, price_stars, _, session = product
     user_id = query.from_user.id
-
-    # Определяем страну
+    # Проверяем сессию заранее, но выдадим только после оплаты
+    if not await is_session_valid(session):
+        await query.edit_message_text(
+            "❌ *ОШИБКА: номер невалиден.*\n\n"
+            "Пожалуйста, выберите другой номер или обратитесь в поддержку.",
+            parse_mode="Markdown"
+        )
+        return
     country_code = get_country_by_phone(phone)
     country = get_country_by_code(country_code) if country_code else None
     country_flag = country['flag'] if country else "🌍"
     country_name = country['name'] if country else "Неизвестно"
     phone_code = country['phone_code'] if country else ""
-
-    # Скрытый номер
     hidden_phone = f"{phone[:4]}****{phone[-4:]}" if len(phone) > 6 else phone
-
-    # Уникальная метка для платежа
     label = f"rub_{product_id}_{user_id}_{int(time.time())}"
-
-    # Сохраняем в ожидании
     pending_rub[user_id] = {
         'product_id': product_id,
         'phone': phone,
@@ -2378,16 +2218,11 @@ async def pay_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'message_id': query.message.message_id,
         'chat_id': query.message.chat_id
     }
-
-    # Ссылка на оплату (ВСТРОЕНА В КНОПКУ)
     payment_url = f"https://yoomoney.ru/quickpay/confirm.xml?receiver={YOOMONEY_WALLET}&quickpay-form=small&sum={price_rub}&label={label}"
-
-    # КНОПКА С ВСТРОЕННОЙ ССЫЛКОЙ (без кнопки "ПРОВЕРИТЬ")
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"💳 ОПЛАТИТЬ {price_rub} ₽", url=payment_url)],
         [btn("🔙 НАЗАД", "shop")]
     ])
-
     await query.edit_message_text(
         f"💳 *ОПЛАТА РУБЛЯМИ*\n\n"
         f"🌍 *Страна:* {country_flag} {country_name} ({phone_code})\n"
@@ -2399,44 +2234,33 @@ async def pay_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=keyboard
     )
 
-
-# ==========================================
-# ПРОВЕРКА ОПЛАТЫ РУБЛЯМИ (ЗАГЛУШКА)
-# ==========================================
-
+# ПРОВЕРКА ОПЛАТЫ РУБЛЯМИ (ЗАГЛУШКА) – используется только при ручной проверке
 async def check_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверка оплаты рублями (заглушка)"""
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
-
     if user_id not in pending_rub:
         await query.edit_message_text("❌ Нет ожидающих платежей!")
         return
-
     pending = pending_rub[user_id]
     product_id = pending['product_id']
-
     product = get_phone_product(product_id)
     if not product:
         await query.edit_message_text("❌ Товар не найден!")
         return
-
     product_id, phone, price_rub, price_stars, _, session = product
-
+    if not await is_session_valid(session):
+        await query.edit_message_text("❌ Сессия невалидна! Обратитесь в поддержку.")
+        return
     delete_phone_product(product_id)
     country_code = get_country_by_phone(phone)
     add_purchase(user_id, phone, price_rub, price_stars, session, country_code)
-
     awaiting_phone_confirmation[user_id] = {
         'phone': phone,
         'product_id': product_id,
         'session': session
     }
-
     del pending_rub[user_id]
-
     await query.edit_message_text(
         generate_product_message(phone, price_rub, price_stars),
         parse_mode="Markdown",
@@ -2446,38 +2270,39 @@ async def check_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
-
-# ==========================================
 # АВТОМАТИЧЕСКАЯ ВЫДАЧА ТОВАРА (ДЛЯ ВЕБХУКА)
-# ==========================================
 async def auto_deliver_product(user_id, product_id):
-    """АВТОМАТИЧЕСКАЯ ВЫДАЧА ТОВАРА ПОСЛЕ ОПЛАТЫ РУБЛЯМИ"""
     logger.info(f"🎁 АВТОМАТИЧЕСКАЯ ВЫДАЧА ТОВАРА ДЛЯ {user_id}")
-
-    # === ПОЛУЧАЕМ ТОВАР ИЗ БД ===
     product = get_phone_product(product_id)
     if not product:
         logger.error(f"❌ Товар {product_id} не найден в БД!")
         return
-
     product_id, phone, price_rub, price_stars, _, session = product
     logger.info(f"📱 Найден товар в БД: {phone}")
-
-    # === УДАЛЯЕМ ИЗ МАГАЗИНА ===
+    # Проверяем валидность сессии
+    if not await is_session_valid(session):
+        logger.error(f"❌ Сессия невалидна для {phone} – отказ в выдаче")
+        for admin in ALL_ADMINS:
+            try:
+                await application.bot.send_message(
+                    admin,
+                    f"⚠️ *ОШИБКА ВЫДАЧИ (вебхук)*\n\n"
+                    f"Пользователь {user_id} оплатил номер {phone}, но сессия невалидна.\n"
+                    f"Товар не выдан."
+                )
+            except:
+                pass
+        return
     delete_result = delete_phone_product(product_id)
     if delete_result:
         logger.info(f"✅ Товар {phone} УДАЛЁН из магазина")
     else:
         logger.error(f"❌ Ошибка удаления товара {phone}!")
-
-    # === СОХРАНЯЕМ ПОКУПКУ (С ПРОВЕРКОЙ) ===
     country_code = get_country_by_phone(phone)
     if not country_code:
         country_code = "UNKNOWN"
         logger.warning(f"⚠️ Страна не найдена для {phone}, установлено UNKNOWN")
-
     logger.info(f"📝 Сохраняем покупку: user_id={user_id}, phone={phone}, country_code={country_code}")
-
     try:
         purchase_result = add_purchase(user_id, phone, price_rub, price_stars, session, country_code)
         if purchase_result:
@@ -2486,8 +2311,6 @@ async def auto_deliver_product(user_id, product_id):
             logger.error(f"❌ add_purchase вернула False для {phone}!")
     except Exception as e:
         logger.error(f"❌ Ошибка при сохранении покупки: {e}")
-
-    # === ПРОВЕРЯЕМ, СОХРАНИЛАСЬ ЛИ ===
     purchases = get_user_purchases(user_id)
     if purchases:
         logger.info(f"✅ Найдено {len(purchases)} покупок у пользователя {user_id}")
@@ -2495,21 +2318,15 @@ async def auto_deliver_product(user_id, product_id):
             logger.info(f"   📱 {p[1]} - {p[2]}₽ / {p[3]}⭐")
     else:
         logger.error(f"❌ У пользователя {user_id} НЕТ покупок в БД!")
-
-    # === СОХРАНЯЕМ ДЛЯ ПОЛУЧЕНИЯ КОДА ===
     awaiting_phone_confirmation[user_id] = {
         'phone': phone,
         'product_id': product_id,
         'session': session
     }
     logger.info(f"✅ Данные сохранены для получения кода")
-
-    # === УДАЛЯЕМ ИЗ ОЖИДАНИЯ ===
     if user_id in pending_rub:
         del pending_rub[user_id]
         logger.info(f"✅ pending_rub очищен для {user_id}")
-
-    # === ОТПРАВЛЯЕМ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЮ ===
     try:
         await application.bot.send_message(
             chat_id=user_id,
@@ -2537,19 +2354,13 @@ async def auto_deliver_product(user_id, product_id):
         except Exception as e2:
             logger.error(f"❌ Ошибка через requests: {e2}")
 
-
-# ==========================================
-# ГЕНЕРАЦИЯ СООБЩЕНИЯ С ТОВАРОМ
-# ==========================================
-
+# ГЕНЕРАЦИЯ СООБЩЕНИЯ
 def generate_product_message(phone, price_rub, price_stars):
-    """Генерирует сообщение с полным номером и предупреждениями"""
     country_code = get_country_by_phone(phone)
     country = get_country_by_code(country_code) if country_code else None
     flag = country['flag'] if country else "🌍"
     name = country['name'] if country else "Неизвестно"
     code = country['phone_code'] if country else ""
-
     return (
         f"✅ *ОПЛАЧЕНО!*\n\n"
         f"🌍 *Страна:* {flag} {name} ({code})\n"
@@ -2564,51 +2375,38 @@ def generate_product_message(phone, price_rub, price_stars):
         f"🔑 Нажмите кнопку, чтобы получить код для входа:"
     )
 
-
-# ==========================================
 # ПОЛУЧЕНИЕ КОДА
-# ==========================================
-
 async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение кода — с подробным логированием"""
     logger.info("🔴🔴🔴 get_code_button ВЫЗВАНА! 🔴🔴🔴")
-
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
     logger.info(f"👤 user_id: {user_id}")
     logger.info(f"📊 awaiting_phone_confirmation: {awaiting_phone_confirmation}")
-
     if user_id not in awaiting_phone_confirmation:
         logger.error(f"❌ НЕТ ДАННЫХ ДЛЯ {user_id}")
         await query.edit_message_text("❌ Нет номеров для получения кода! Оплатите номер сначала.")
         return
-
     data = awaiting_phone_confirmation[user_id]
     phone = data['phone']
     session = data['session']
     logger.info(f"📞 НОМЕР: {phone}")
     logger.info(f"🔑 СЕССИЯ: {session[:30]}...")
-
     await query.edit_message_text(
         f"🔍 *ИЩУ КОД ДЛЯ НОМЕРА*\n\n"
         f"📞 {phone}\n\n"
         f"⏳ Подключаюсь к аккаунту...",
         parse_mode="Markdown"
     )
-
     try:
         code_found, result = await get_last_code_from_account(phone, session)
         logger.info(f"🔑 РЕЗУЛЬТАТ: code={code_found}, result={result}")
-
         if code_found:
             keyboard = InlineKeyboardMarkup([
                 [btn("✅ КОД ПОДОШЁЛ", "code_ok")],
                 [btn("🔄 НОВЫЙ КОД", "get_code")],
                 [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
             ])
-
             await query.edit_message_text(
                 f"🔑 *САМЫЙ СВЕЖИЙ КОД НАЙДЕН!*\n\n"
                 f"📞 Номер: `{phone}`\n"
@@ -2618,11 +2416,22 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard
             )
         else:
+            # Если сессия невалидна, попробуем уведомить админа
+            if "не авторизован" in result.lower():
+                for admin in ALL_ADMINS:
+                    try:
+                        await context.bot.send_message(
+                            admin,
+                            f"⚠️ *НЕУДАЧА ПОЛУЧЕНИЯ КОДА*\n\n"
+                            f"Пользователь {user_id} пытается получить код для {phone},\n"
+                            f"но сессия невалидна. Требуется ручное вмешательство."
+                        )
+                    except:
+                        pass
             keyboard = InlineKeyboardMarkup([
                 [btn("🔄 ПОВТОРИТЬ ПОИСК", "get_code")],
                 [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
             ])
-
             await query.edit_message_text(
                 f"⚠️ *КОД НЕ НАЙДЕН*\n\n"
                 f"📞 Номер: `{phone}`\n\n"
@@ -2640,26 +2449,16 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-
-# ==========================================
-# КОД ПОДОШЁЛ
-# ==========================================
-
 async def code_ok_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Код подошёл — показываем кнопку для отзыва"""
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
-
     if user_id in awaiting_phone_confirmation:
         del awaiting_phone_confirmation[user_id]
-
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("⭐ ОСТАВИТЬ ОТЗЫВ", url="https://t.me/poncisnop")],
         [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
     ])
-
     await query.edit_message_text(
         f"🎉 *СДЕЛКА ЗАВЕРШЕНА!*\n\n"
         f"✅ Код подошёл! Аккаунт ваш!\n"
@@ -2681,41 +2480,28 @@ async def code_ok_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=keyboard
     )
 
-
-# ==========================================
-# ОТПРАВКА УВЕДОМЛЕНИЙ В ТЕЛЕГРАМ
-# ==========================================
-
+# ОТПРАВКА УВЕДОМЛЕНИЙ
 def send_notification_to_telegram(data):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
-        # === ПРОВЕРЯЕМ, ТЕСТОВОЕ ЛИ ЭТО УВЕДОМЛЕНИЕ ===
         is_test = data.get('test_notification') == 'true'
-
-        # === ПОЛУЧАЕМ ДАННЫЕ ===
         notification_type = data.get('notification_type', 'Неизвестно')
         amount = data.get('amount', '0')
         sender = data.get('sender', 'Неизвестно')
         label = data.get('label', 'Отсутствует')
         datetime_str = data.get('datetime', 'Неизвестно')
-
-        # === ОПРЕДЕЛЯЕМ ПОДТИП ПЛАТЕЖА ===
         if notification_type == 'card-incoming':
             sub_type = "Платёж по карте"
         elif notification_type == 'p2p-incoming':
             sub_type = "Перевод между кошельками"
         else:
             sub_type = notification_type
-
-        # === ПАРСИМ МЕТКУ ДЛЯ ПОЛУЧЕНИЯ ТОВАРА И ПОКУПАТЕЛЯ (как при оплате звёздами) ===
         product_id = "Неизвестно"
         user_id = "Неизвестно"
         phone = None
         price_stars = "Неизвестно"
         country_flag = "🌍"
         country_name = "Неизвестно"
-
         if label and label.startswith('rub_'):
             parts = label.split('_')
             if len(parts) >= 3:
@@ -2724,7 +2510,6 @@ def send_notification_to_telegram(data):
                     user_id = int(parts[2])
                 except (ValueError, IndexError):
                     pass
-
                 product = get_phone_product(product_id)
                 if product:
                     pid, phone, price_rub, price_stars, session = product[:5]
@@ -2732,14 +2517,10 @@ def send_notification_to_telegram(data):
                     country = get_country_by_code(country_code) if country_code else None
                     country_flag = country['flag'] if country else "🌍"
                     country_name = country['name'] if country else "Неизвестно"
-
-        # === ЭКРАНИРУЕМ ДИНАМИЧЕСКИЕ ЗНАЧЕНИЯ ДЛЯ HTML (как при оплате звёздами) ===
         safe_sender = html.escape(sender)
         safe_datetime = html.escape(datetime_str)
         safe_country_name = html.escape(str(country_name))
         safe_hidden_phone = html.escape(str(phone)) if phone else "Неизвестно"
-
-        # === ФОРМИРУЕМ СООБЩЕНИЕ В HTML (как при оплате звёздами, но под рубли) ===
         if is_test:
             message = (
                 f"🧪 <b>ТЕСТОВОЕ УВЕДОМЛЕНИЕ</b>\n\n"
@@ -2768,8 +2549,6 @@ def send_notification_to_telegram(data):
                 f"📅 Дата: {safe_datetime}\n\n"
                 f"✅ Статус: ОПЛАЧЕНО"
             )
-
-        # === ОТПРАВЛЯЕМ В ОБА ЧАТА И ПРОВЕРЯЕМ КАЖДЫЙ ОТВЕТ (как при оплате звёздами) ===
         all_ok = True
         for chat_id in (ADMIN_CHAT_ID, HELPER_ID):
             response = requests.post(
@@ -2784,42 +2563,25 @@ def send_notification_to_telegram(data):
             if response.status_code != 200:
                 all_ok = False
                 logger.error(f"❌ Ошибка отправки в {chat_id}: {response.status_code} - {response.text}")
-
         if all_ok:
             logger.info("✅ Уведомление отправлено в Telegram")
         else:
             logger.error("❌ Ошибка отправки уведомления в Telegram")
-
     except Exception as e:
         logger.error(f"❌ Ошибка отправки уведомления: {e}")
 
-
-# ==========================================
-# ОТПРАВКА УВЕДОМЛЕНИЙ ОБ ОПЛАТЕ ЗВЁЗДАМИ
-# ==========================================
-
 async def send_stars_notification_to_telegram(context, user_id, username, phone, price_stars, price_rub,
                                               product_id):
-    """Отправляет уведомление об оплате звёздами в Telegram (как в yoomoney_webhook)"""
     try:
-        # === ЭКРАНИРУЕМ ДИНАМИЧЕСКИЕ ЗНАЧЕНИЯ ДЛЯ HTML ===
         safe_username = html.escape(username) if username else "Нет"
-
-        # === ОПРЕДЕЛЯЕМ СТРАНУ ===
         country_code = get_country_by_phone(phone)
         country = get_country_by_code(country_code) if country_code else None
         country_flag = country['flag'] if country else "🌍"
         country_name = country['name'] if country else "Неизвестно"
         safe_country_name = html.escape(country_name)
-
-        # === СКРЫТЫЙ НОМЕР ===
         hidden_phone = f"{phone[:4]}****{phone[-4:]}" if len(phone) > 6 else phone
         safe_hidden_phone = html.escape(hidden_phone)
-
-        # === ДАТА И ВРЕМЯ ===
         datetime_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-        # === ФОРМИРУЕМ СООБЩЕНИЕ В HTML (безопасно от спецсимволов) ===
         message = (
             f"⭐ <b>ОПЛАТА ЗВЁЗДАМИ</b>\n\n"
             f"📌 Тип: Оплата Telegram Stars\n"
@@ -2833,45 +2595,27 @@ async def send_stars_notification_to_telegram(context, user_id, username, phone,
             f"📅 Дата: {datetime_str}\n\n"
             f"✅ Статус: ОПЛАЧЕНО"
         )
-
-        # === ОТПРАВЛЯЕМ АДМИНУ ЧЕРЕЗ БОТА (надёжно) ===
         await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message, parse_mode="HTML")
         await context.bot.send_message(chat_id=HELPER_ID, text=message, parse_mode="HTML")
-
         logger.info(f"✅ Уведомление об оплате звёздами отправлено в Telegram")
     except Exception as e:
         logger.error(f"❌ Ошибка отправки уведомления об оплате звёздами: {e}")
 
-
-# ==========================================
-# FLASK-СЕРВЕР ДЛЯ ВЕБХУКА
-# ==========================================
-
+# FLASK
 def start_flask():
-    """Запускает Flask-сервер"""
     flask_app.run(host="0.0.0.0", port=10000, debug=False, use_reloader=False)
-
 
 @flask_app.route('/', methods=['POST'])
 def yoomoney_webhook():
-    """Обработка уведомлений от ЮMoney — с поддержкой тестовых"""
     data = request.form
     logger.info(f"📨 Получен вебхук: {data}")
-
-    # === ОТПРАВЛЯЕМ ВСЕ УВЕДОМЛЕНИЯ В БОТА ===
     send_notification_to_telegram(data)
-
-    # === ОБРАБОТКА ТЕСТОВОГО УВЕДОМЛЕНИЯ ===
     if data.get('test_notification') == 'true':
         logger.info("🧪 Тестовое уведомление — пропускаем")
         return "OK", 200
-
-    # === ПРОВЕРЯЕМ, ЧТО ЭТО РЕАЛЬНЫЙ ПЛАТЁЖ ===
     if data.get('notification_type') != 'card-incoming':
         logger.info(f"⏭️ Не card-incoming — пропускаем")
         return "OK", 200
-
-    # === ОБРАБОТКА РЕАЛЬНОГО ПЛАТЕЖА ===
     label = data.get('label')
     if label and label.startswith('rub_'):
         parts = label.split('_')
@@ -2886,19 +2630,11 @@ def yoomoney_webhook():
                 )
             else:
                 logger.error("❌ BOT_LOOP ещё не готов — не могу выдать товар")
-
     return "OK", 200
-
 
 @flask_app.route('/', methods=['GET'])
 def webhook_test():
-    """Проверка работы вебхука"""
     return "✅ Webhook работает!", 200
-
-
-# ==========================================
-# ОБРАБОТЧИК ОШИБОК
-# ==========================================
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"❌ Ошибка: {context.error}")
@@ -2910,34 +2646,25 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =====================================================================
-# LZT MARKET (API) — ПОКУПКА НОМЕРА
+# LZT MARKET (API) – ПОКУПКА НОМЕРА
 # =====================================================================
 
-# ---------------------------------------------------------------------------
-# LZT CONFIG
-# ---------------------------------------------------------------------------
 LZT_MAX_PRICE = 10
 LZT_SPAM_FILTER = "no"
 LZT_EXCLUDE_COUNTRIES = {"TH", "th", "Thailand", "thailand", "Таиланд"}
 LZT_ORDER_BY = "price_to_up"
 LZT_PROXY = None
-
-# Включить подробное логирование ответов API для отладки
 LZT_DEBUG_RAW = True
-# ---------------------------------------------------------------------------
 
-# Хранилище активных LZT-покупок: user_id -> {"item_id": int, "phone": str, "login_data": dict, "country": str}
 lzt_purchases = {}
 
 try:
     from LOLZTEAM.Client import Market
-
     _lzt_market_cls = Market
     _lzt_available = True
 except ImportError:
     _lzt_available = False
     logger.error("[!] pip install LOLZTEAM не установлен. LZT Market API недоступен.")
-
 
 def _lzt_log_raw(label: str, resp) -> None:
     if not LZT_DEBUG_RAW:
@@ -2948,7 +2675,6 @@ def _lzt_log_raw(label: str, resp) -> None:
     except Exception:
         pass
 
-
 def _lzt_get_item_id(item: Dict[str, Any]) -> Optional[int]:
     for key in ("item_id", "id"):
         val = item.get(key)
@@ -2956,13 +2682,11 @@ def _lzt_get_item_id(item: Dict[str, Any]) -> Optional[int]:
             return int(val)
     return None
 
-
 def _lzt_get_price(item: Dict[str, Any]) -> float:
     price = item.get("price")
     if price is not None:
         return float(price)
     return 0.0
-
 
 def _lzt_get_seller_fee_price(item: Dict[str, Any]) -> float:
     p = item.get("priceWithSellerFee")
@@ -2970,13 +2694,11 @@ def _lzt_get_seller_fee_price(item: Dict[str, Any]) -> float:
         return float(p)
     return _lzt_get_price(item) * 1.03
 
-
 def _lzt_get_country(item: Dict[str, Any]) -> str:
     val = item.get("telegram_country") or item.get("country") or item.get("telegramCountry")
     if val:
         return str(val)
     return ""
-
 
 def _lzt_get_title(item: Dict[str, Any]) -> str:
     val = item.get("title")
@@ -2984,20 +2706,17 @@ def _lzt_get_title(item: Dict[str, Any]) -> str:
         return str(val)
     return "N/A"
 
-
 def _lzt_get_description(item: Dict[str, Any]) -> str:
     val = item.get("description") or item.get("desc") or item.get("body")
     if val:
         return str(val)
     return ""
 
-
 def _lzt_is_thailand(country: str) -> bool:
     if not country:
         return False
     c = country.strip()
     return c in LZT_EXCLUDE_COUNTRIES or c.lower() in {e.lower() for e in LZT_EXCLUDE_COUNTRIES}
-
 
 def _lzt_fetch_balance_and_account_id(market) -> Tuple[Optional[float], Optional[int]]:
     try:
@@ -3029,7 +2748,6 @@ def _lzt_fetch_balance_and_account_id(market) -> Tuple[Optional[float], Optional
         logger.warning(f"[BALANCE] Ошибка: {e}")
         return None, None
 
-
 def _lzt_deep_find(data: Any, target_keys: tuple, max_depth: int = 10) -> list:
     found = []
     if max_depth <= 0:
@@ -3045,7 +2763,6 @@ def _lzt_deep_find(data: Any, target_keys: tuple, max_depth: int = 10) -> list:
         for item in data:
             found.extend(_lzt_deep_find(item, target_keys, max_depth - 1))
     return found
-
 
 def _lzt_extract_login_data(data: Dict[str, Any]) -> Dict[str, Any]:
     result = {}
@@ -3117,7 +2834,6 @@ def _lzt_extract_login_data(data: Dict[str, Any]) -> Dict[str, Any]:
                 break
     return result
 
-
 def _lzt_extract_phone_from_text(text: str) -> Optional[str]:
     if not text:
         return None
@@ -3132,7 +2848,6 @@ def _lzt_extract_phone_from_text(text: str) -> Optional[str]:
             if len(phone) >= 10:
                 return phone
     return None
-
 
 def _lzt_extract_phone(login_data: Dict[str, Any], item: Optional[Dict[str, Any]] = None) -> Optional[str]:
     for key in ("phone", "phone_number", "number", "tel", "telegram_phone"):
@@ -3173,7 +2888,6 @@ def _lzt_extract_phone(login_data: Dict[str, Any], item: Optional[Dict[str, Any]
             return str(v).strip()
     return None
 
-
 def _lzt_fetch_verification_code(market, item_id: int) -> Optional[str]:
     endpoint = f"/{item_id}/telegram-login-code"
     try:
@@ -3205,9 +2919,7 @@ def _lzt_fetch_verification_code(market, item_id: int) -> Optional[str]:
         logger.error(f"[CODE] Ошибка запроса кода: {e}")
     return None
 
-
 def _lzt_extract_session(login_data: Dict[str, Any]) -> Optional[str]:
-    """Извлекает Telethon/Pyrogram session-строку из login_data."""
     for key in ("session", "tg_session", "telethon_session", "pyrogram_session", "session_deep", "raw_session_string"):
         val = login_data.get(key)
         if val and isinstance(val, str) and len(val) > 10:
@@ -3229,17 +2941,13 @@ def _lzt_extract_session(login_data: Dict[str, Any]) -> Optional[str]:
                 pass
     return None
 
-
 async def _lzt_create_new_session(phone: str, item_id: int, token: str) -> Tuple[Optional[str], str]:
-    """Создаёт новую сессию: запрашивает код, получает через LZT API, входит."""
     session = StringSession()
     client = TelegramClient(session, API_ID, API_HASH)
     try:
         await asyncio.wait_for(client.connect(), timeout=15)
         sent = await asyncio.wait_for(client.send_code_request(phone), timeout=15)
         logger.info(f"[LZT-SESSION] Код запрошен для {phone}")
-
-        # Получаем код через LZT API (в отдельном потоке)
         def _fetch_code():
             try:
                 asyncio.get_event_loop()
@@ -3249,7 +2957,6 @@ async def _lzt_create_new_session(phone: str, item_id: int, token: str) -> Tuple
             if LZT_PROXY:
                 market.settings.proxy = LZT_PROXY
             return _lzt_fetch_verification_code(market, item_id)
-
         code = None
         for _ in range(6):
             await asyncio.sleep(4)
@@ -3257,11 +2964,9 @@ async def _lzt_create_new_session(phone: str, item_id: int, token: str) -> Tuple
             if code and code.isdigit():
                 logger.info(f"[LZT-SESSION] Код получен: {code}")
                 break
-
         if not code:
             await client.disconnect()
             return None, "no_code"
-
         await asyncio.wait_for(
             client.sign_in(phone, code, phone_code_hash=sent.phone_code_hash),
             timeout=15
@@ -3283,9 +2988,7 @@ async def _lzt_create_new_session(phone: str, item_id: int, token: str) -> Tuple
         await client.disconnect()
         return None, f"error:{str(e)[:100]}"
 
-
 async def _lzt_verify_existing_session(session_str: str) -> bool:
-    """Проверяет, валидна ли существующая сессия."""
     try:
         client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
         await asyncio.wait_for(client.connect(), timeout=10)
@@ -3295,30 +2998,21 @@ async def _lzt_verify_existing_session(session_str: str) -> bool:
     except Exception:
         return False
 
-
 async def _lzt_get_fresh_code(session_str: str, phone: str) -> Tuple[Optional[str], str]:
-    """Запрашивает новый код входа и читает его из чата Telegram."""
     try:
         client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
         await asyncio.wait_for(client.connect(), timeout=15)
         if not await client.is_user_authorized():
             await client.disconnect()
             return None, "not_authorized"
-
-        # Запрашиваем код для входа пользователя
         await asyncio.wait_for(client.send_code_request(phone), timeout=15)
         logger.info(f"[AUTO-CODE] Код запрошен для {phone}")
-
-        # Ждём появления в чате Telegram
         await asyncio.sleep(5)
-
-        # Ищем код в диалоге Telegram
         telegram_dialog = None
         async for dialog in client.iter_dialogs():
             if "Telegram" in dialog.name:
                 telegram_dialog = dialog
                 break
-
         code = None
         if telegram_dialog:
             async for msg in client.iter_messages(telegram_dialog.id, limit=20):
@@ -3329,13 +3023,11 @@ async def _lzt_get_fresh_code(session_str: str, phone: str) -> Tuple[Optional[st
                     code = match.group(1)
                     logger.info(f"[AUTO-CODE] Код найден: {code}")
                     break
-
         await client.disconnect()
         return code, "ok" if code else "no_code_in_chat"
     except Exception as e:
         logger.error(f"[AUTO-CODE] Ошибка: {e}")
         return None, f"error:{str(e)[:100]}"
-
 
 def _lzt_fetch_account_data(market, item_id: int, retries: int = 3) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     for attempt in range(1, retries + 1):
@@ -3356,11 +3048,8 @@ def _lzt_fetch_account_data(market, item_id: int, retries: int = 3) -> Tuple[Dic
                 time.sleep(2)
     return {}, {}
 
-
 def _lzt_buy_single_account(market, target_country: Optional[str] = None) -> Tuple[
     bool, Optional[int], Optional[str], Optional[Dict[str, Any]], Optional[str], Optional[float]]:
-    """Покупает один аккаунт. Возвращает (success, item_id, phone, login_data, country, price).
-    Если target_country задан — ищет ТОЛЬКО эту страну."""
     logger.info("[SEARCH] Ищу один подходящий аккаунт...")
     query = (
         f"/telegram?"
@@ -3377,7 +3066,6 @@ def _lzt_buy_single_account(market, target_country: Optional[str] = None) -> Tup
     except Exception as e:
         logger.error(f"[SEARCH] Ошибка поиска: {e}")
         return False, None, None, None, None, None
-
     items = data.get("items", [])
     if not items:
         items = data.get("accounts", [])
@@ -3386,8 +3074,6 @@ def _lzt_buy_single_account(market, target_country: Optional[str] = None) -> Tup
     if not items:
         logger.info("[SEARCH] Лотов не найдено.")
         return False, None, None, None, None, None
-
-    # Фильтруем по стране, если задана
     if target_country:
         filtered = []
         for item in items:
@@ -3401,11 +3087,9 @@ def _lzt_buy_single_account(market, target_country: Optional[str] = None) -> Tup
         logger.info(f"[SEARCH] Найдено {len(items)} лотов для страны {target_country}...")
     else:
         logger.info(f"[SEARCH] Найдено {len(items)} лотов (любая страна)...")
-
     balance, balance_id = _lzt_fetch_balance_and_account_id(market)
     if balance is not None:
         logger.info(f"[BALANCE] Доступно: {balance:.2f} ₽ (balance_id: {balance_id})")
-
     for item in items:
         item_id = _lzt_get_item_id(item)
         if item_id is None:
@@ -3423,7 +3107,6 @@ def _lzt_buy_single_account(market, target_country: Optional[str] = None) -> Tup
             logger.warning(
                 f"[SKIP] ID:{item_id} — недостаточно средств (нужно ~{price_total:.2f} ₽, есть {balance:.2f} ₽)")
             continue
-
         logger.info(
             f"[BUY] ID:{item_id} | {price}₽ (итого ~{price_total:.2f}₽) | Country:{country or 'N/A'} | {title[:60]}")
         payload: Dict[str, Any] = {"price": price}
@@ -3458,12 +3141,10 @@ def _lzt_buy_single_account(market, target_country: Optional[str] = None) -> Tup
         except Exception as e:
             logger.error(f"  ❌ ОШИБКА покупки ID:{item_id}: {e}")
             continue
-
     logger.info("[RESULT] Подходящих лотов не найдено.")
     return False, None, None, None, None, None
 
-
-# ===== МЕНЮ ВЫБОРА ПОКУПКИ LZT =====
+# МЕНЮ ВЫБОРА ПОКУПКИ LZT
 async def lzt_buy_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -3471,7 +3152,6 @@ async def lzt_buy_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if not is_admin(user_id):
         await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
         return
-
     rows = [
         [btn("🎲 РАНДОМНЫЙ НОМЕР", "lzt_buy_random")],
         [btn("🌍 ВЫБРАТЬ СТРАНУ", "lzt_buy_country")],
@@ -3484,9 +3164,7 @@ async def lzt_buy_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=InlineKeyboardMarkup(rows)
     )
 
-
 async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Покупка рандомного номера (любая страна)."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -3497,13 +3175,11 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("❌ LZT Market API недоступен. Установите: pip install LOLZTEAM",
                                       reply_markup=back("admin_panel"))
         return
-
     await query.edit_message_text(
         "⏳ <b>ИДЁТ ПОКУПКА РАНДОМНОГО НОМЕРА...</b>\n\n"
         "Это может занять некоторое время. Ожидайте.",
         parse_mode="HTML"
     )
-
     def run_purchase():
         try:
             asyncio.get_event_loop()
@@ -3513,7 +3189,6 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
         if LZT_PROXY:
             market.settings.proxy = LZT_PROXY
         return _lzt_buy_single_account(market, target_country=None)
-
     try:
         loop = asyncio.get_running_loop()
         success, item_id, phone, login_data, country, price = await loop.run_in_executor(None, run_purchase)
@@ -3526,8 +3201,6 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
                 "price": price
             }
             phone_display = phone if phone else "Неизвестен"
-
-            # --- ОПРЕДЕЛЯЕМ ЦЕНЫ ИЗ CONFIG.PY ПО СТРАНЕ ---
             price_rub_shop = 0
             price_stars_shop = 0
             if phone:
@@ -3536,70 +3209,70 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
                 if ccfg:
                     price_rub_shop = ccfg.get('price') or 0
                     price_stars_shop = ccfg.get('stars') or 0
-
-            # --- СОЗДАЁМ НОВУЮ СЕССИЮ ---
             queue_text = ""
             session_saved = False
-
             if phone:
-                # Пробуем создать новую сессию через phone + код с LZT
                 new_session, status = await _lzt_create_new_session(phone, item_id, get_lzt_token())
-
                 if new_session:
-                    save_phone_session(phone, new_session)
-                    update_phone_prices(phone, price_rub_shop, price_stars_shop)
-                    session_saved = True
-                    queue_text = (
-                        f"🔒 <b>Новая сессия создана!</b>\n"
-                        f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
-                        f"Через <b>24ч+1мин</b> старые сессии будут сброшены,\n"
-                        f"и номер автоматически появится в магазине."
-                    )
-                else:
-                    # Fallback: используем существующую сессию из LZT
-                    old_session = _lzt_extract_session(login_data)
-                    if old_session and await _lzt_verify_existing_session(old_session):
-                        save_phone_session(phone, old_session)
+                    # Проверяем валидность новой сессии
+                    if await is_session_valid(new_session):
+                        save_phone_session(phone, new_session)
                         update_phone_prices(phone, price_rub_shop, price_stars_shop)
                         session_saved = True
-                        safe_status = html.escape(str(status))
                         queue_text = (
-                            f"⚠️ <b>Новая сессия не создана</b> ({safe_status})\n"
-                            f"Использована сессия от продавца.\n"
+                            f"🔒 <b>Новая сессия создана и валидна!</b>\n"
                             f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
-                            f"Через <b>24ч+1мин</b> номер появится в магазине."
+                            f"Через <b>24ч+1мин</b> старые сессии будут сброшены,\n"
+                            f"и номер автоматически появится в магазине."
                         )
                     else:
-                        queue_text = (
-                            f"❌ <b>Сессия не получена</b> ({html.escape(str(status))})\n"
-                            f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
-                            f"Номер добавлен в магазин без сессии."
-                        )
-
+                        logger.error(f"❌ Новая сессия невалидна для {phone}")
+                        queue_text = f"❌ <b>Новая сессия невалидна</b> – номер не будет добавлен."
+                else:
+                    old_session = _lzt_extract_session(login_data)
+                    if old_session and await _lzt_verify_existing_session(old_session):
+                        # Проверяем валидность старой сессии
+                        if await is_session_valid(old_session):
+                            save_phone_session(phone, old_session)
+                            update_phone_prices(phone, price_rub_shop, price_stars_shop)
+                            session_saved = True
+                            safe_status = html.escape(str(status))
+                            queue_text = (
+                                f"⚠️ <b>Новая сессия не создана</b> ({safe_status})\n"
+                                f"Использована сессия от продавца (валидна).\n"
+                                f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
+                                f"Через <b>24ч+1мин</b> номер появится в магазине."
+                            )
+                        else:
+                            queue_text = f"❌ <b>Сессия продавца невалидна</b> – номер не будет добавлен."
+                    else:
+                        queue_text = f"❌ <b>Сессия не получена</b> ({html.escape(str(status))}) – номер не добавлен."
                 if session_saved:
                     asyncio.create_task(terminate_other_sessions_and_add_to_shop(
                         phone, price_rub_shop, price_stars_shop, user_id, context
                     ))
                 else:
-                    add_phone_product(phone, price_rub_shop, price_stars_shop, "")
+                    # Номер не будет добавлен – удаляем из БД, если он был создан
+                    try:
+                        conn = sqlite3.connect(DB_NAME, timeout=10)
+                        conn.execute("DELETE FROM phone_products WHERE phone=?", (phone,))
+                        conn.commit()
+                        conn.close()
+                    except Exception as e:
+                        logger.error(f"Ошибка удаления номера {phone} из БД: {e}")
             else:
                 queue_text = "❌ Номер телефона не найден — не удалось поставить в очередь."
-
-            # --- АВТОМАТИЧЕСКИ ПОЛУЧАЕМ КОД ДЛЯ ПОЛЬЗОВАТЕЛЯ ---
             auto_code = None
             if session_saved and phone:
                 session_str = get_phone_session(phone)
                 if session_str:
                     auto_code, _ = await _lzt_get_fresh_code(session_str, phone)
-
             safe_phone = html.escape(str(phone_display))
             safe_country = html.escape(str(country or "N/A"))
             safe_price = html.escape(f"{price:.2f}")
-
             code_text = ""
             if auto_code:
                 code_text = f"\n🔑 <b>КОД ДЛЯ ВХОДА:</b> <code>{html.escape(auto_code)}</code>\n"
-
             await query.edit_message_text(
                 f"✅ <b>НОМЕР УСПЕШНО КУПЛЕН!</b>\n\n"
                 f"📱 Номер: <code>{safe_phone}</code>\n"
@@ -3645,21 +3318,17 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=back("admin_panel")
         )
 
-
 async def lzt_buy_country_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать список стран для выбора."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     if not is_admin(user_id):
         await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
         return
-
     rows = []
     for country in COUNTRIES:
         rows.append([btn(f"{country['flag']} {country['name']}", f"lzt_country_{country['code']}")])
     rows.append([btn("🔙 НАЗАД", "lzt_buy_menu")])
-
     await query.edit_message_text(
         "🌍 <b>ВЫБЕРИТЕ СТРАНУ ДЛЯ ПОКУПКИ</b>\n\n"
         "Бот купит номер ТОЛЬКО выбранной страны.\n"
@@ -3668,9 +3337,7 @@ async def lzt_buy_country_callback(update: Update, context: ContextTypes.DEFAULT
         reply_markup=InlineKeyboardMarkup(rows)
     )
 
-
 async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Покупка номера конкретной страны."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -3681,19 +3348,16 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
         await query.edit_message_text("❌ LZT Market API недоступен. Установите: pip install LOLZTEAM",
                                       reply_markup=back("admin_panel"))
         return
-
     country_code = query.data.replace("lzt_country_", "")
     country_info = get_country_by_code(country_code)
     country_name = country_info['name'] if country_info else country_code
     country_flag = country_info['flag'] if country_info else "🌍"
-
     safe_cname = html.escape(str(country_name))
     await query.edit_message_text(
         f"⏳ <b>ИЩУ НОМЕР: {country_flag} {safe_cname}...</b>\n\n"
         f"Проверяю наличие лотов на LZT Market.",
         parse_mode="HTML"
     )
-
     def run_purchase():
         try:
             asyncio.get_event_loop()
@@ -3703,12 +3367,9 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
         if LZT_PROXY:
             market.settings.proxy = LZT_PROXY
         return _lzt_buy_single_account(market, target_country=country_code)
-
     try:
         loop = asyncio.get_running_loop()
         success, item_id, phone, login_data, country, price = await loop.run_in_executor(None, run_purchase)
-
-        # Проверяем: лотов вообще не было для этой страны
         if not success and country and not item_id and price is None:
             safe_cname2 = html.escape(str(country_name))
             await query.edit_message_text(
@@ -3723,7 +3384,6 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
                 ])
             )
             return
-
         if success and item_id:
             lzt_purchases[user_id] = {
                 "item_id": item_id,
@@ -3733,8 +3393,6 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
                 "price": price
             }
             phone_display = phone if phone else "Неизвестен"
-
-            # --- ОПРЕДЕЛЯЕМ ЦЕНЫ ИЗ CONFIG.PY ПО СТРАНЕ ---
             price_rub_shop = 0
             price_stars_shop = 0
             if phone:
@@ -3743,70 +3401,67 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
                 if ccfg:
                     price_rub_shop = ccfg.get('price') or 0
                     price_stars_shop = ccfg.get('stars') or 0
-
-            # --- СОЗДАЁМ НОВУЮ СЕССИЮ ---
             queue_text = ""
             session_saved = False
-
             if phone:
-                # Пробуем создать новую сессию через phone + код с LZT
                 new_session, status = await _lzt_create_new_session(phone, item_id, get_lzt_token())
-
                 if new_session:
-                    save_phone_session(phone, new_session)
-                    update_phone_prices(phone, price_rub_shop, price_stars_shop)
-                    session_saved = True
-                    queue_text = (
-                        f"🔒 <b>Новая сессия создана!</b>\n"
-                        f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
-                        f"Через <b>24ч+1мин</b> старые сессии будут сброшены,\n"
-                        f"и номер автоматически появится в магазине."
-                    )
-                else:
-                    # Fallback: используем существующую сессию из LZT
-                    old_session = _lzt_extract_session(login_data)
-                    if old_session and await _lzt_verify_existing_session(old_session):
-                        save_phone_session(phone, old_session)
+                    if await is_session_valid(new_session):
+                        save_phone_session(phone, new_session)
                         update_phone_prices(phone, price_rub_shop, price_stars_shop)
                         session_saved = True
-                        safe_status = html.escape(str(status))
                         queue_text = (
-                            f"⚠️ <b>Новая сессия не создана</b> ({safe_status})\n"
-                            f"Использована сессия от продавца.\n"
+                            f"🔒 <b>Новая сессия создана и валидна!</b>\n"
                             f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
-                            f"Через <b>24ч+1мин</b> номер появится в магазине."
+                            f"Через <b>24ч+1мин</b> старые сессии будут сброшены,\n"
+                            f"и номер автоматически появится в магазине."
                         )
                     else:
-                        queue_text = (
-                            f"❌ <b>Сессия не получена</b> ({html.escape(str(status))})\n"
-                            f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
-                            f"Номер добавлен в магазин без сессии."
-                        )
-
+                        logger.error(f"❌ Новая сессия невалидна для {phone}")
+                        queue_text = f"❌ <b>Новая сессия невалидна</b> – номер не будет добавлен."
+                else:
+                    old_session = _lzt_extract_session(login_data)
+                    if old_session and await _lzt_verify_existing_session(old_session):
+                        if await is_session_valid(old_session):
+                            save_phone_session(phone, old_session)
+                            update_phone_prices(phone, price_rub_shop, price_stars_shop)
+                            session_saved = True
+                            safe_status = html.escape(str(status))
+                            queue_text = (
+                                f"⚠️ <b>Новая сессия не создана</b> ({safe_status})\n"
+                                f"Использована сессия от продавца (валидна).\n"
+                                f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
+                                f"Через <b>24ч+1мин</b> номер появится в магазине."
+                            )
+                        else:
+                            queue_text = f"❌ <b>Сессия продавца невалидна</b> – номер не будет добавлен."
+                    else:
+                        queue_text = f"❌ <b>Сессия не получена</b> ({html.escape(str(status))}) – номер не добавлен."
                 if session_saved:
                     asyncio.create_task(terminate_other_sessions_and_add_to_shop(
                         phone, price_rub_shop, price_stars_shop, user_id, context
                     ))
                 else:
-                    add_phone_product(phone, price_rub_shop, price_stars_shop, "")
+                    try:
+                        conn = sqlite3.connect(DB_NAME, timeout=10)
+                        conn.execute("DELETE FROM phone_products WHERE phone=?", (phone,))
+                        conn.commit()
+                        conn.close()
+                    except Exception as e:
+                        logger.error(f"Ошибка удаления номера {phone} из БД: {e}")
             else:
                 queue_text = "❌ Номер телефона не найден — не удалось поставить в очередь."
-
-            # --- АВТОМАТИЧЕСКИ ПОЛУЧАЕМ КОД ДЛЯ ПОЛЬЗОВАТЕЛЯ ---
             auto_code = None
             if session_saved and phone:
                 session_str = get_phone_session(phone)
                 if session_str:
                     auto_code, _ = await _lzt_get_fresh_code(session_str, phone)
-
             safe_phone2 = html.escape(str(phone_display))
             safe_country2 = html.escape(str(country or "N/A"))
             safe_price2 = html.escape(f"{price:.2f}")
-
             code_text = ""
             if auto_code:
                 code_text = f"\n🔑 <b>КОД ДЛЯ ВХОДА:</b> <code>{html.escape(auto_code)}</code>\n"
-
             await query.edit_message_text(
                 f"✅ <b>НОМЕР УСПЕШНО КУПЛЕН!</b>\n\n"
                 f"🌍 Страна: {safe_country2}\n"
@@ -3842,8 +3497,6 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
             reply_markup=back("admin_panel")
         )
 
-
-# ===== Обработчик кнопки "ПОЛУЧИТЬ КОД" =====
 async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -3854,16 +3507,13 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if user_id not in lzt_purchases:
         await query.edit_message_text("❌ Нет активной покупки! Сначала купите номер.", reply_markup=back("admin_panel"))
         return
-
     await query.edit_message_text(
         "⏳ <b>ПОЛУЧАЮ КОД С LZT MARKET...</b>\n\n"
         "Это может занять некоторое время. Ожидайте.",
         parse_mode="HTML"
     )
-
     item_id = lzt_purchases[user_id]["item_id"]
     phone = lzt_purchases[user_id].get("phone", "Неизвестен")
-
     def run_get_code():
         try:
             asyncio.get_event_loop()
@@ -3873,7 +3523,6 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if LZT_PROXY:
             market.settings.proxy = LZT_PROXY
         return _lzt_fetch_verification_code(market, item_id)
-
     try:
         loop = asyncio.get_running_loop()
         code = await loop.run_in_executor(None, run_get_code)
@@ -3915,28 +3564,22 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
 # =====================================================================
 
 async def run_app():
-    """Асинхронный запуск бота. PTB v20+ управляет циклом самостоятельно."""
     logger.info("=" * 60)
     logger.info("🚀 ЗАПУСК БОТА...")
     logger.info("=" * 60)
-
     load_admins_from_db()
     logger.info(f"👑 АДМИНЫ: {ADMINS}")
     logger.info(f"🛠️ МОДЕРАТОРЫ: {MODERATORS}")
-
     app = Application.builder().token(BOT_TOKEN).build()
-
     global application
     application = app
 
-    # ConversationHandler для добавления админа
+    # Conversation handlers...
     add_admin_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_admin_start, pattern="^add_admin$")],
         states={ADD_ADMIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_admin_confirm)]},
         fallbacks=[CommandHandler("start", start)]
     )
-
-    # ConversationHandler для добавления номера
     add_phone_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_phone_start, pattern="^add_phone$")],
         states={
@@ -3948,43 +3591,32 @@ async def run_app():
         },
         fallbacks=[CommandHandler("start", start)]
     )
-
-    # ConversationHandler для изменения цены в рублях
     edit_rub_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(edit_rub_start, pattern="^edit_rub$")],
         states={EDIT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_rub_input)]},
         fallbacks=[CommandHandler("start", start)]
     )
-
-    # ConversationHandler для изменения цены в Stars
     edit_stars_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(edit_stars_start, pattern="^edit_stars$")],
         states={EDIT_STARS: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_stars_input)]},
         fallbacks=[CommandHandler("start", start)]
     )
-
-    # ConversationHandler для предложений
     offer_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(make_offer, pattern="^make_offer$")],
         states={AWAITING_OFFER: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_offer)]},
         fallbacks=[CommandHandler("start", start)]
     )
-
-    # ConversationHandler для смены LZT API TOKEN
     change_lzt_token_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(change_lzt_token_start, pattern="^change_lzt_token$")],
         states={EDIT_LZT_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, change_lzt_token_confirm)]},
         fallbacks=[CommandHandler("start", start)]
     )
-
-    # ConversationHandler для возмещения аккаунта (ВОЗМЕЩЕНИЕ)
     compensate_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(compensate_start, pattern="^compensate$")],
         states={COMPENSATE_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, compensate_confirm)]},
         fallbacks=[CommandHandler("start", start)]
     )
 
-    # === РЕГИСТРАЦИЯ ВСЕХ ОБРАБОТЧИКОВ ===
     app.add_handler(add_admin_conv)
     app.add_handler(add_phone_conv)
     app.add_handler(edit_rub_conv)
@@ -4054,32 +3686,24 @@ async def run_app():
     logger.info("🛠️ МОДЕРАТОРЫ: " + str(MODERATORS if MODERATORS else "Нет"))
     logger.info("=" * 60)
 
-    # Инициализируем и запускаем polling вручную (чтобы loop оставался живым)
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
 
-    # Сохраняем running loop для Flask-вебхука
     global BOT_LOOP
     BOT_LOOP = asyncio.get_running_loop()
     logger.info(f"🔄 BOT_LOOP установлен: {BOT_LOOP}")
 
-    # Запускаем периодические фоновые задачи (освобождение очереди каждую минуту)
     asyncio.create_task(schedule_periodic_tasks(app))
     logger.info("⏰ Периодические задачи запущены (освобождение очереди каждую минуту)")
 
-    # Бесконечное ожидание — loop остаётся открытым
     stop_event = asyncio.Event()
     await stop_event.wait()
 
-
 def main():
-    # Запускаем Flask в отдельном потоке ДО asyncio.run()
     flask_thread = threading.Thread(target=start_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask-сервер запущен на порту 10000")
-
-    # Запускаем бота через asyncio.run — он создаст и будет держать event loop
     try:
         asyncio.run(run_app())
     except KeyboardInterrupt:
@@ -4087,7 +3711,6 @@ def main():
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}")
         raise
-
 
 if __name__ == "__main__":
     main()
