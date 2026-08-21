@@ -536,17 +536,15 @@ logger.info("=" * 60)
 # =====================================================================
 
 async def is_session_valid(session_string: str) -> bool:
-    """Проверяет, валидна ли сессия (авторизована)."""
     if not session_string:
         return False
     try:
         client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
-        await asyncio.wait_for(client.connect(), timeout=10)
-        authorized = await client.is_user_authorized()
+        await client.start()  # <-- ПОПЫТКА АВТОРИЗОВАТЬСЯ
+        me = await client.get_me()
         await client.disconnect()
-        return authorized
+        return True if me else False
     except Exception as e:
-        logger.warning(f"⚠️ Ошибка проверки сессии: {e}")
         return False
 
 async def send_code_to_phone(phone, user_id):
