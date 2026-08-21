@@ -2148,18 +2148,23 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     pid, phone, price_rub, price_stars, session = product[:5]
     # Проверяем валидность сессии перед выдачей
     if not await is_session_valid(session):
+        # Удаляем номер из магазина, так как он невалиден
+        delete_phone_product(product_id)
+        # Получаем username или fallback
+        username = update.effective_user.username or f"ID {user_id}"
         await update.message.reply_text(
             "❌ *ОШИБКА: сессия невалидна.*\n\n"
             "Номер не может быть выдан. Пожалуйста, обратитесь в поддержку.",
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]])
         )
         for admin in ALL_ADMINS:
             try:
                 await context.bot.send_message(
                     admin,
                     f"⚠️ *ОШИБКА ВЫДАЧИ*\n\n"
-                    f"Пользователь {user_id} оплатил номер {phone}, но сессия невалидна.\n"
-                    f"Необходимо вручную выдать номер или возместить оплату."
+                    f"Пользователь {username} оплатил номер {phone}, но сессия невалидна.\n"
+                    f"Номер удалён из магазина. Необходимо вручную выдать номер или возместить оплату."
                 )
             except:
                 pass
@@ -2201,7 +2206,8 @@ async def pay_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "❌ *ОШИБКА: номер невалиден.*\n\n"
             "Пожалуйста, выберите другой номер или обратитесь в поддержку.",
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]])
         )
         return
     country_code = get_country_by_phone(phone)
@@ -2282,13 +2288,21 @@ async def auto_deliver_product(user_id, product_id):
     # Проверяем валидность сессии
     if not await is_session_valid(session):
         logger.error(f"❌ Сессия невалидна для {phone} – отказ в выдаче")
+        # Удаляем номер из магазина
+        delete_phone_product(product_id)
+        # Пытаемся получить username через API бота
+        try:
+            chat = await application.bot.get_chat(user_id)
+            username = chat.username or f"ID {user_id}"
+        except Exception:
+            username = f"ID {user_id}"
         for admin in ALL_ADMINS:
             try:
                 await application.bot.send_message(
                     admin,
                     f"⚠️ *ОШИБКА ВЫДАЧИ (вебхук)*\n\n"
-                    f"Пользователь {user_id} оплатил номер {phone}, но сессия невалидна.\n"
-                    f"Товар не выдан."
+                    f"Пользователь {username} оплатил номер {phone}, но сессия невалидна.\n"
+                    f"Номер удалён из магазина. Товар не выдан."
                 )
             except:
                 pass
