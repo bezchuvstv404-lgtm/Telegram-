@@ -542,6 +542,7 @@ async def is_session_valid(session_string: str) -> bool:
         client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
         await client.start()  # <-- ПОПЫТКА АВТОРИЗОВАТЬСЯ
         me = await client.get_me()
+        logger.info(me)
         await client.disconnect()
         return True if me else False
     except Exception as e:
