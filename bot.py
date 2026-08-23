@@ -3307,8 +3307,7 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
                 if session_str:
                     client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
                     await client.connect()
-                    if await client.is_user_authorized():
-                        await open_bot_link(client)
+                    await open_bot_link(client)
                     await client.disconnect()
             except Exception as e:
                 logger.error(f"❌ Ошибка открытия TONEROMine_Bot для {phone_display}: {e}")
