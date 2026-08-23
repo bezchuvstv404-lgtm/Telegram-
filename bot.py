@@ -33,6 +33,12 @@ from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.functions.auth import ResetAuthorizationsRequest
 
 # ==========================================
+# НАСТРОЙКА ЛОГИРОВАНИЯ (добавлено)
+# ==========================================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# ==========================================
 # ИМПОРТ ЛИЧНЫХ ДАННЫХ ИЗ CONFIG.PY
 # ==========================================
 import sys
@@ -3378,14 +3384,15 @@ async def run_app():
     app.add_handler(CallbackQueryHandler(disagree_terms, pattern="^disagree_terms$"))
     app.add_handler(CallbackQueryHandler(reviews, pattern="^reviews$"))
     app.add_handler(CallbackQueryHandler(offer, pattern="^offer$"))
-    app.add_handler(CallbackQueryHandler(accept_offer, pattern="^accept_offer:\d+$"))
-    app.add_handler(CallbackQueryHandler(reject_offer, pattern="^reject_offer:\d+$"))
+    # Исправлены raw-строки для всех pattern с \d
+    app.add_handler(CallbackQueryHandler(accept_offer, pattern=r"^accept_offer:\d+$"))
+    app.add_handler(CallbackQueryHandler(reject_offer, pattern=r"^reject_offer:\d+$"))
     app.add_handler(CallbackQueryHandler(support, pattern="^support$"))
     app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
     app.add_handler(CallbackQueryHandler(show_queue_callback, pattern="^show_queue$"))
     app.add_handler(CallbackQueryHandler(refresh_queue_callback, pattern="^refresh_queue$"))
     app.add_handler(CallbackQueryHandler(remove_admin, pattern="^remove_admin$"))
-    app.add_handler(CallbackQueryHandler(remove_admin_confirm, pattern="^remove_admin_\d+$"))
+    app.add_handler(CallbackQueryHandler(remove_admin_confirm, pattern=r"^remove_admin_\d+$"))
     app.add_handler(CallbackQueryHandler(list_admins, pattern="^list_admins$"))
 
     app.add_handler(CallbackQueryHandler(lzt_buy_menu_callback, pattern="^lzt_buy_menu$"))
@@ -3395,28 +3402,28 @@ async def run_app():
     app.add_handler(CallbackQueryHandler(lzt_get_code_callback, pattern="^lzt_get_code$"))
 
     app.add_handler(CallbackQueryHandler(shop, pattern="^shop$"))
-    app.add_handler(CallbackQueryHandler(shop_page, pattern="^shop_page_\d+$"))
+    app.add_handler(CallbackQueryHandler(shop_page, pattern=r"^shop_page_\d+$"))
     app.add_handler(CallbackQueryHandler(shop_country, pattern="^shop_country_"))
-    app.add_handler(CallbackQueryHandler(select_phone, pattern="^select_phone_\d+$"))
+    app.add_handler(CallbackQueryHandler(select_phone, pattern=r"^select_phone_\d+$"))
 
     app.add_handler(CallbackQueryHandler(delete_phone_start, pattern="^delete_phone$"))
-    app.add_handler(CallbackQueryHandler(delete_phone_confirm, pattern="^del_phone_\d+$"))
-    app.add_handler(CallbackQueryHandler(delete_phone_yes, pattern="^del_yes_\d+$"))
+    app.add_handler(CallbackQueryHandler(delete_phone_confirm, pattern=r"^del_phone_\d+$"))
+    app.add_handler(CallbackQueryHandler(delete_phone_yes, pattern=r"^del_yes_\d+$"))
 
     app.add_handler(CallbackQueryHandler(edit_price_start, pattern="^edit_price$"))
-    app.add_handler(CallbackQueryHandler(edit_select_phone, pattern="^edit_select_\d+$"))
+    app.add_handler(CallbackQueryHandler(edit_select_phone, pattern=r"^edit_select_\d+$"))
 
-    app.add_handler(CallbackQueryHandler(pay_stars, pattern="^pay_stars_\d+$"))
-    app.add_handler(CallbackQueryHandler(pay_rub, pattern="^pay_rub_\d+$"))
-    app.add_handler(CallbackQueryHandler(check_rub, pattern="^check_rub_\d+$"))
+    app.add_handler(CallbackQueryHandler(pay_stars, pattern=r"^pay_stars_\d+$"))
+    app.add_handler(CallbackQueryHandler(pay_rub, pattern=r"^pay_rub_\d+$"))
+    app.add_handler(CallbackQueryHandler(check_rub, pattern=r"^check_rub_\d+$"))
 
     app.add_handler(CallbackQueryHandler(get_code_button, pattern="^get_code$"))
     app.add_handler(CallbackQueryHandler(code_ok_button, pattern="^code_ok$"))
 
     app.add_handler(CallbackQueryHandler(my_purchases, pattern="^my_purchases$"))
-    app.add_handler(CallbackQueryHandler(purchase_code, pattern="^purchase_code_\d+$"))
-    app.add_handler(CallbackQueryHandler(purchase_get_code, pattern="^purchase_get_code_\d+$"))
-    app.add_handler(CallbackQueryHandler(purchase_ok, pattern="^purchase_ok_\d+$"))
+    app.add_handler(CallbackQueryHandler(purchase_code, pattern=r"^purchase_code_\d+$"))
+    app.add_handler(CallbackQueryHandler(purchase_get_code, pattern=r"^purchase_get_code_\d+$"))
+    app.add_handler(CallbackQueryHandler(purchase_ok, pattern=r"^purchase_ok_\d+$"))
     app.add_handler(CallbackQueryHandler(clear_purchases_start, pattern="^clear_purchases$"))
     app.add_handler(CallbackQueryHandler(clear_purchases_yes, pattern="^clear_purchases_yes$"))
 
