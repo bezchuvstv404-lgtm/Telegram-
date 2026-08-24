@@ -560,7 +560,6 @@ async def enter_code_in_telegram(code, user_id):
         me = await client.get_me()
         session_string = client.session.save()
         save_phone_session(phone, session_string)
-        creation_date = None
         async with accounts_lock:
             if user_id not in accounts:
                 accounts[user_id] = {}
@@ -570,12 +569,11 @@ async def enter_code_in_telegram(code, user_id):
                     'product_id': None,
                     'client': client,
                     'phone': phone,
-                    'session': session_string,
-                    'creation_date': creation_date
+                    'session': session_string
                 }
         async with clients_lock:
             del clients[user_id]
-        return True, f"✅ Вход как {me.first_name}", me, creation_date
+        return True, f"✅ Вход как {me.first_name}", me, None
     except errors.SessionPasswordNeededError:
         return False, "2FA", None, None
     except Exception as e:
@@ -613,13 +611,31 @@ async def enter_2fa_in_telegram(password, user_id):
         return False, str(e), None, None
 
 
-async def get_last_code_from_account(phone, session_string):
-    """Ищет все коды и возвращает самый свежий"""
-    try:
+async def get_or_create_telegram_client(phone, session_string=None):
+    """Возвращает живой Telethon-клиент, который НИКОГДА не отключается.
+    Клиент кэшируется по номеру телефона и остаётся подключённым, чтобы можно было
+    получать коды в любой момент без повторного входа."""
+    if phone in telethon_clients_cache:
+        client = telethon_clients_cache[phone]
+        if client.is_connected():
+            return client
+    if session_string:
         client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
-        await asyncio.wait_for(client.connect(), timeout=10)
+    else:
+        client = TelegramClient(StringSession(), API_ID, API_HASH)
+    await asyncio.wait_for(client.connect(), timeout=15)
+    if not await client.is_user_authorized():
+        # Не отключаемся намеренно; просто сообщим о состоянии
+        return client
+    telethon_clients_cache[phone] = client
+    return client
+
+
+async def get_last_code_from_account(phone, session_string):
+    """Ищет все коды через ЖИВОГО клиента, который никогда не отключается"""
+    try:
+        client = await get_or_create_telegram_client(phone, session_string)
         if not await client.is_user_authorized():
-            await client.disconnect()
             return None, "Аккаунт не авторизован"
 
         telegram_dialog = None
@@ -629,7 +645,6 @@ async def get_last_code_from_account(phone, session_string):
                 break
 
         if not telegram_dialog:
-            await client.disconnect()
             return None, "Диалог Telegram не найден"
 
         all_codes = []
@@ -641,8 +656,6 @@ async def get_last_code_from_account(phone, session_string):
             match = re.search(r'\b(\d{5})\b', msg.text)
             if match:
                 all_codes.append((match.group(1), msg.date.timestamp() if msg.date else 0))
-
-        await client.disconnect()
 
         if all_codes:
             all_codes.sort(key=lambda x: x[1], reverse=True)
@@ -662,54 +675,42 @@ async def open_bot_link(client):
         return False
 
 
-async def terminate_other_sessions_and_add_to_shop(phone, price_rub, price_stars, user_id, context):
-    """Ждёт 24ч + 1мин, удаляет все другие сессии и добавляет номер в магазин."""
-    await asyncio.sleep(86460)  # 24 часа * 3600 + 60 секунд
-
-    session_string = get_phone_session(phone)
-    if not session_string:
-        logger.error(f"❌ Сессия не найдена для {phone} при авто-удалении сессий")
-        return
-
-    # --- Удаляем все другие сессии через Telethon ---
+async def add_phone_to_shop_now(phone, price_rub, price_stars, session_string=None, user_id=None, context=None):
+    """Мгновенно сохраняет номер в магазине и держит клиента в памяти (никогда не отключается).
+    Клиент переживает 24ч+ без переподключения — код можно получить в любой момент."""
     try:
-        client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
-        await asyncio.wait_for(client.connect(), timeout=15)
-        if await client.is_user_authorized():
-            await client(ResetAuthorizationsRequest())
-            logger.info(f"✅ Другие сессии удалены для {phone}")
-        await client.disconnect()
+        # Сохраняем в магазин с available=1 СРАЗУ
+        result = add_phone_product(phone, price_rub, price_stars, session_string or "")
+        logger.info(f"🛒 Номер {phone} добавлен в магазин (цена {price_rub}₽ / {price_stars}⭐)")
+
+        # Гарантируем, что живой клиент уже кэш-ирован и остаётся подключённым
+        if session_string and phone not in telethon_clients_cache:
+            await get_or_create_telegram_client(phone, session_string)
+
+        if result and user_id and context:
+            country_code = get_country_by_phone(phone)
+            country = get_country_by_code(country_code)
+            country_flag = country['flag'] if country else "🌍"
+            country_name = country['name'] if country else "Неизвестно"
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"✅ *НОМЕР ДОБАВЛЕН В МАГАЗИН!*\n\n"
+                        f"📱 `{phone}`\n"
+                        f"🌍 {country_flag} {country_name}\n"
+                        f"💰 {price_rub} ₽  |  ⭐ {price_stars} Stars\n\n"
+                        f"🔒 Клиент аккаунта подключён навсегда и не отключается.\n"
+                        f"🏪 Номер уже доступен для покупки."
+                    ),
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"❌ Не удалось уведомить {user_id}: {e}")
+        return result
     except Exception as e:
-        logger.error(f"❌ Ошибка удаления сессий для {phone}: {e}")
-        return
-
-    # --- Добавляем в магазин ---
-    result = add_phone_product(phone, price_rub, price_stars, session_string)
-    if result:
-        logger.info(f"✅ Номер {phone} добавлен в магазин после 24ч")
-
-        country_code = get_country_by_phone(phone)
-        country = get_country_by_code(country_code)
-        country_flag = country['flag'] if country else "🌍"
-        country_name = country['name'] if country else "Неизвестно"
-
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    f"✅ *НОМЕР ДОБАВЛЕН В МАГАЗИН!*\n\n"
-                    f"📱 `{phone}`\n"
-                    f"🌍 {country_flag} {country_name}\n"
-                    f"💰 {price_rub} ₽  |  ⭐ {price_stars} Stars\n\n"
-                    f"🔒 Все сторонние сессии были удалены.\n"
-                    f"🏪 Теперь номер доступен для покупки."
-                ),
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logger.error(f"❌ Не удалось уведомить админа {user_id}: {e}")
-    else:
-        logger.error(f"❌ Ошибка добавления {phone} в магазин после ожидания")
+        logger.error(f"❌ Ошибка добавления в магазин: {e}")
+        return False
 
 
 logger.info("=" * 60)
@@ -1425,15 +1426,13 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         country = get_country_by_code(country_code)
         country_flag = country['flag'] if country else "🌍"
         country_name = country['name'] if country else "Неизвестно"
-        creation_text = creation_date.strftime('%d.%m.%Y %H:%M') if creation_date else "Неизвестно"
 
         await update.message.reply_text(
             f"✅ ВОШЁЛ В АККАУНТ!\n\n"
             f"📱 {phone}\n"
             f"🌍 {country_flag} {country_name}\n"
             f"👤 {me.first_name}\n"
-            f"🆔 `{me.id}`\n"
-            f"📅 {creation_text}"
+            f"🆔 `{me.id}`"
         )
 
         # Открываем ссылку на TONEROMine_Bot
@@ -1443,18 +1442,15 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if client:
                     await open_bot_link(client)
 
-        # --- ЗАПУСКАЕМ ТАЙМЕР: 24ч + 1мин ---
-        asyncio.create_task(terminate_other_sessions_and_add_to_shop(
-            phone, price_rub, price_stars, user_id, context
-        ))
+        # --- СРАЗУ ДОБАВЛЯЕМ В МАГАЗИН (без очереди и без ожидания 24ч) ---
+        await add_phone_to_shop_now(phone, price_rub, price_stars, session_string, user_id, context)
 
         await update.message.reply_text(
-            f"⏳ *НОМЕР ПОСТАВЛЕН В ОЧЕРЕДЬ*\n\n"
+            f"🏪 *НОМЕР ДОБАВЛЕН В МАГАЗИН*\n\n"
             f"📱 {phone}\n"
             f"🌍 {country_flag} {country_name}\n"
             f"💰 {price_rub} ₽  |  ⭐ {price_stars} Stars\n\n"
-            f"🔒 Через *24 часа и 1 минуту* все сторонние сессии будут удалены,\n"
-            f"и номер автоматически появится в магазине.",
+            f"🔒 Клиент аккаунта теперь подключён навсегда и не отключается.",
             parse_mode="Markdown"
         )
 
@@ -1500,15 +1496,13 @@ async def add_phone_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
         country = get_country_by_code(country_code)
         country_flag = country['flag'] if country else "🌍"
         country_name = country['name'] if country else "Неизвестно"
-        creation_text = creation_date.strftime('%d.%m.%Y %H:%M') if creation_date else "Неизвестно"
 
         await update.message.reply_text(
             f"✅ ВОШЁЛ В АККАУНТ (2FA)!\n\n"
             f"📱 {phone}\n"
             f"🌍 {country_flag} {country_name}\n"
             f"👤 {me.first_name}\n"
-            f"🆔 `{me.id}`\n"
-            f"📅 {creation_text}"
+            f"🆔 `{me.id}`"
         )
 
         # Открываем ссылку на TONEROMine_Bot
@@ -1518,18 +1512,15 @@ async def add_phone_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if client:
                     await open_bot_link(client)
 
-        # --- ЗАПУСКАЕМ ТАЙМЕР: 24ч + 1мин ---
-        asyncio.create_task(terminate_other_sessions_and_add_to_shop(
-            phone, price_rub, price_stars, user_id, context
-        ))
+        # --- СРАЗУ ДОБАВЛЯЕМ В МАГАЗИН (без очереди и без ожидания 24ч) ---
+        await add_phone_to_shop_now(phone, price_rub, price_stars, session_string, user_id, context)
 
         await update.message.reply_text(
-            f"⏳ *НОМЕР ПОСТАВЛЕН В ОЧЕРЕДЬ*\n\n"
+            f"🏪 *НОМЕР ДОБАВЛЕН В МАГАЗИН*\n\n"
             f"📱 {phone}\n"
             f"🌍 {country_flag} {country_name}\n"
             f"💰 {price_rub} ₽  |  ⭐ {price_stars} Stars\n\n"
-            f"🔒 Через *24 часа и 1 минуту* все сторонние сессии будут удалены,\n"
-            f"и номер автоматически появится в магазине.",
+            f"🔒 Клиент аккаунта теперь подключён навсегда и не отключается.",
             parse_mode="Markdown"
         )
 
@@ -3298,58 +3289,53 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
                     price_rub_shop = ccfg.get('price') or 0
                     price_stars_shop = ccfg.get('stars') or 0
 
-            # --- СОЗДАЁМ НОВУЮ СЕССИЮ ---
+            # --- ПУБЛИКУЕМ НОМЕР В МАГАЗИН СРАЗУ И СОХРАНЯЕМ ЖИВОГО КЛИЕНТА ---
             queue_text = ""
             session_saved = False
+            used_session = ""
 
             if phone:
                 # Пробуем создать новую сессию через phone + код с LZT
                 new_session, status = await _lzt_create_new_session(phone, item_id, get_lzt_token())
 
                 if new_session:
-                    save_phone_session(phone, new_session)
+                    used_session = new_session
                     session_saved = True
                     queue_text = (
-                        f"🔒 <b>Новая сессия создана!</b>\n"
+                        f"🔒 <b>Клиент аккаунта подключён навсегда!</b>\n"
                         f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
-                        f"Через <b>24ч+1мин</b> старые сессии будут сброшены,\n"
-                        f"и номер автоматически появится в магазине."
+                        f"Номер уже добавлен в магазин."
                     )
                 else:
                     # Fallback: используем существующую сессию из LZT
                     old_session = _lzt_extract_session(login_data)
                     if old_session and await _lzt_verify_existing_session(old_session):
-                        save_phone_session(phone, old_session)
+                        used_session = old_session
                         session_saved = True
                         safe_status = html.escape(str(status))
                         queue_text = (
-                            f"⚠️ <b>Новая сессия не создана</b> ({safe_status})\n"
-                            f"Использована сессия от продавца.\n"
+                            f"⚠️ <b>Клиент жив из существующей сессии</b> ({safe_status})\n"
                             f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
-                            f"Через <b>24ч+1мин</b> номер появится в магазине."
+                            f"Номер уже добавлен в магазин."
                         )
                     else:
                         queue_text = (
-                            f"❌ <b>Сессия не получена</b> ({html.escape(str(status))})\n"
+                            f"❌ <b>Клиент не получен</b> ({html.escape(str(status))})\n"
                             f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
-                            f"Номер добавлен в магазин без сессии."
+                            f"Номер добавлен в магазин без клиента."
                         )
 
-                if session_saved:
-                    asyncio.create_task(terminate_other_sessions_and_add_to_shop(
-                        phone, price_rub_shop, price_stars_shop, user_id, context
-                    ))
+                if session_saved and used_session:
+                    await add_phone_to_shop_now(phone, price_rub_shop, price_stars_shop, used_session, user_id, context)
                 else:
                     add_phone_product(phone, price_rub_shop, price_stars_shop, "")
             else:
-                queue_text = "❌ Номер телефона не найден — не удалось поставить в очередь."
+                queue_text = "❌ Номер телефона не найден — не удалось добавить в магазин."
 
             # --- АВТОМАТИЧЕСКИ ПОЛУЧАЕМ КОД ДЛЯ ПОЛЬЗОВАТЕЛЯ ---
             auto_code = None
-            if session_saved and phone:
-                session_str = get_phone_session(phone)
-                if session_str:
-                    auto_code, _ = await _lzt_get_fresh_code(session_str, phone)
+            if session_saved and phone and used_session:
+                auto_code, _ = await _lzt_get_fresh_code(used_session, phone)
 
             safe_phone = html.escape(str(phone_display))
             safe_country = html.escape(str(country or "N/A"))
@@ -3526,58 +3512,53 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
                     price_rub_shop = ccfg.get('price') or 0
                     price_stars_shop = ccfg.get('stars') or 0
 
-            # --- СОЗДАЁМ НОВУЮ СЕССИЮ ---
+            # --- ПУБЛИКУЕМ НОМЕР В МАГАЗИН СРАЗУ И СОХРАНЯЕМ ЖИВОГО КЛИЕНТА ---
             queue_text = ""
             session_saved = False
+            used_session = ""
 
             if phone:
                 # Пробуем создать новую сессию через phone + код с LZT
                 new_session, status = await _lzt_create_new_session(phone, item_id, get_lzt_token())
 
                 if new_session:
-                    save_phone_session(phone, new_session)
+                    used_session = new_session
                     session_saved = True
                     queue_text = (
-                        f"🔒 <b>Новая сессия создана!</b>\n"
+                        f"🔒 <b>Клиент аккаунта подключён навсегда!</b>\n"
                         f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
-                        f"Через <b>24ч+1мин</b> старые сессии будут сброшены,\n"
-                        f"и номер автоматически появится в магазине."
+                        f"Номер уже добавлен в магазин."
                     )
                 else:
                     # Fallback: используем существующую сессию из LZT
                     old_session = _lzt_extract_session(login_data)
                     if old_session and await _lzt_verify_existing_session(old_session):
-                        save_phone_session(phone, old_session)
+                        used_session = old_session
                         session_saved = True
                         safe_status = html.escape(str(status))
                         queue_text = (
-                            f"⚠️ <b>Новая сессия не создана</b> ({safe_status})\n"
-                            f"Использована сессия от продавца.\n"
+                            f"⚠️ <b>Клиент жив из существующей сессии</b> ({safe_status})\n"
                             f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
-                            f"Через <b>24ч+1мин</b> номер появится в магазине."
+                            f"Номер уже добавлен в магазин."
                         )
                     else:
                         queue_text = (
-                            f"❌ <b>Сессия не получена</b> ({html.escape(str(status))})\n"
+                            f"❌ <b>Клиент не получен</b> ({html.escape(str(status))})\n"
                             f"💰 Цена в магазине: {price_rub_shop} ₽ / {price_stars_shop} ⭐\n"
-                            f"Номер добавлен в магазин без сессии."
+                            f"Номер добавлен в магазин без клиента."
                         )
 
-                if session_saved:
-                    asyncio.create_task(terminate_other_sessions_and_add_to_shop(
-                        phone, price_rub_shop, price_stars_shop, user_id, context
-                    ))
+                if session_saved and used_session:
+                    await add_phone_to_shop_now(phone, price_rub_shop, price_stars_shop, used_session, user_id, context)
                 else:
                     add_phone_product(phone, price_rub_shop, price_stars_shop, "")
             else:
-                queue_text = "❌ Номер телефона не найден — не удалось поставить в очередь."
+                queue_text = "❌ Номер телефона не найден — не удалось добавить в магазин."
 
             # --- АВТОМАТИЧЕСКИ ПОЛУЧАЕМ КОД ДЛЯ ПОЛЬЗОВАТЕЛЯ ---
             auto_code = None
-            if session_saved and phone:
-                session_str = get_phone_session(phone)
-                if session_str:
-                    auto_code, _ = await _lzt_get_fresh_code(session_str, phone)
+            if session_saved and phone and used_session:
+                auto_code, _ = await _lzt_get_fresh_code(used_session, phone)
 
             safe_phone2 = html.escape(str(phone_display))
             safe_country2 = html.escape(str(country or "N/A"))
