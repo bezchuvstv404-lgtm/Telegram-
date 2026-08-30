@@ -2026,9 +2026,9 @@ async def code_ok_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 # LZT MARKET (API) — ВСЕ ФУНКЦИИ
 # ============================================================
-LZT_MAX_PRICE = 10
+LZT_MAX_PRICE = 20
 LZT_SPAM_FILTER = "no"
-LZT_EXCLUDE_COUNTRIES = {"TH", "th", "Thailand", "thailand", "Таиланд"}
+LZT_EXCLUDE_COUNTRIES = {}
 LZT_ORDER_BY = "price_to_up"
 LZT_PROXY = None
 LZT_DEBUG_RAW = True
