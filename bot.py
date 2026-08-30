@@ -62,6 +62,7 @@ EDIT_STARS = 41
 AWAITING_OFFER = 50
 EDIT_LZT_TOKEN = 60
 COMPENSATE_USER = 70
+COMPENSATE_SELECT = 71   # новое состояние для выбора номера при возмещении
 
 CALLBACK_OFFER = "offer"
 CALLBACK_ACCEPT = "accept_offer"
@@ -964,6 +965,9 @@ async def change_lzt_token_confirm(update: Update, context: ContextTypes.DEFAULT
     )
     return ConversationHandler.END
 
+# ============================================================
+# ФУНКЦИИ ВОЗМЕЩЕНИЯ (с выбором номера)
+# ============================================================
 async def compensate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -971,6 +975,7 @@ async def compensate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
         return ConversationHandler.END
 
+    # Проверяем, есть ли номера в магазине
     products = get_phone_products()
     if not products:
         await query.edit_message_text(
@@ -1018,6 +1023,10 @@ async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return COMPENSATE_USER
 
+    # Сохраняем ID пользователя в context для последующего использования
+    context.user_data['compensate_target_user_id'] = target_user_id
+
+    # Показываем список доступных номеров для выбора
     products = get_phone_products()
     if not products:
         await update.message.reply_text(
@@ -1027,22 +1036,56 @@ async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return ConversationHandler.END
 
-    import random
-    product = random.choice(products)
-    product_id, phone, price_rub, price_stars = product
+    rows = []
+    for pid, phone, price_rub, price_stars in products:
+        country_code = get_country_by_phone(phone)
+        country = get_country_by_code(country_code)
+        flag = country['flag'] if country else "🌍"
+        rows.append([btn(f"{flag} {phone} ({price_stars}⭐ / {price_rub}₽)", f"comp_select_{pid}")])
+    rows.append([btn("🔙 ОТМЕНА", "admin_panel")])
 
+    await update.message.reply_text(
+        f"🎁 *ВЫБЕРИТЕ НОМЕР ДЛЯ ВОЗМЕЩЕНИЯ*\n\n"
+        f"Пользователь: `{target_user_id}`\n\n"
+        f"Доступно номеров: {len(products)}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
+    return COMPENSATE_SELECT
+
+async def compensate_select_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    admin_id = query.from_user.id
+    if not is_admin(admin_id):
+        await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
+        return ConversationHandler.END
+
+    # Получаем product_id из callback
+    product_id = int(query.data.replace("comp_select_", ""))
+    target_user_id = context.user_data.get('compensate_target_user_id')
+    if not target_user_id:
+        await query.edit_message_text("❌ Ошибка: ID пользователя не найден. Попробуйте сначала.",
+                                      reply_markup=back("admin_panel"))
+        return ConversationHandler.END
+
+    # Проверяем, что товар ещё существует
     full_product = get_phone_product(product_id)
     if not full_product:
-        await update.message.reply_text("❌ Ошибка получения номера!", reply_markup=back("admin_panel"))
+        await query.edit_message_text("❌ Этот номер уже был выдан или удалён.",
+                                      reply_markup=back("admin_panel"))
         return ConversationHandler.END
 
     _, phone, price_rub, price_stars, session = full_product
 
+    # Удаляем номер из магазина
     delete_phone_product(product_id)
 
+    # Сохраняем покупку
     country_code = get_country_by_phone(phone)
     add_purchase(target_user_id, phone, price_rub, price_stars, session, country_code)
 
+    # Сохраняем данные для получения кода
     awaiting_phone_confirmation[target_user_id] = {
         'phone': phone,
         'product_id': product_id,
@@ -1054,6 +1097,7 @@ async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
     name = country['name'] if country else "Неизвестно"
     code = country['phone_code'] if country else ""
 
+    # Отправляем пользователю
     try:
         await context.bot.send_message(
             chat_id=target_user_id,
@@ -1076,7 +1120,7 @@ async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
             ])
         )
-        await update.message.reply_text(
+        await query.edit_message_text(
             f"✅ *АККАУНТ ВОЗМЕЩЁН!*\n\n"
             f"👤 Пользователь: `{target_user_id}`\n"
             f"📱 Номер: `{phone}`\n"
@@ -1087,7 +1131,7 @@ async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
     except Exception as e:
         logger.error(f"❌ Ошибка отправки возмещения: {e}")
-        await update.message.reply_text(
+        await query.edit_message_text(
             f"❌ *НЕ УДАЛОСЬ ОТПРАВИТЬ АККАУНТ*\n\n"
             f"Пользователь `{target_user_id}` не найден или бот заблокирован.\n\n"
             f"Номер `{phone}` удалён из магазина.",
@@ -1095,8 +1139,15 @@ async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=back("admin_panel")
         )
 
+    # Очищаем данные
+    if 'compensate_target_user_id' in context.user_data:
+        del context.user_data['compensate_target_user_id']
+
     return ConversationHandler.END
 
+# ============================================================
+# Остальные функции (без изменений)
+# ============================================================
 async def add_phone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -3208,7 +3259,10 @@ async def run_app():
 
     compensate_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(compensate_start, pattern="^compensate$")],
-        states={COMPENSATE_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, compensate_confirm)]},
+        states={
+            COMPENSATE_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, compensate_confirm)],
+            COMPENSATE_SELECT: [CallbackQueryHandler(compensate_select_phone, pattern="^comp_select_")],
+        },
         fallbacks=[CommandHandler("start", start)]
     )
 
