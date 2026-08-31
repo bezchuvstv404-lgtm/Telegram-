@@ -32,15 +32,23 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# ========== ИСПРАВЛЕННЫЙ ИМПОРТ ==========
 try:
     from config import (
         BOT_TOKEN, ADMIN_ID, API_ID, API_HASH, YOOMONEY_WALLET,
-        DB_NAME, CHANNEL_ID, ADMIN_CHAT_ID, ADMINS, COUNTRIES, HELPER_ID
+        DB_NAME, CHANNEL_ID, ADMIN_CHAT_ID, ADMINS, COUNTRIES
     )
+    # HELPER_ID может отсутствовать в config.py — задаём значение по умолчанию
+    try:
+        from config import HELPER_ID
+    except ImportError:
+        HELPER_ID = ADMIN_ID
+        print("⚠️ HELPER_ID не найден в config.py, установлен равным ADMIN_ID")
     print("✅ Конфигурация загружена из config.py")
 except ImportError:
     print("⚠️ Файл config.py не найден! БОТ НЕ ЗАПУСТИТСЯ!")
     exit()
+# ==========================================
 
 application = None
 BOT_LOOP = None
