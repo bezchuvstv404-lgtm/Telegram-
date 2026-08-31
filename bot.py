@@ -62,7 +62,7 @@ EDIT_STARS = 41
 AWAITING_OFFER = 50
 EDIT_LZT_TOKEN = 60
 COMPENSATE_USER = 70
-COMPENSATE_SELECT = 71   # новое состояние для выбора номера при возмещении
+COMPENSATE_SELECT = 71
 
 CALLBACK_OFFER = "offer"
 CALLBACK_ACCEPT = "accept_offer"
@@ -78,9 +78,17 @@ telethon_clients_cache = {}
 clients_lock = asyncio.Lock()
 accounts_lock = asyncio.Lock()
 
-def get_country_by_phone(phone):
-    if phone and not phone.startswith('+'):
+def normalize_phone(phone):
+    """Приводит номер к единому формату с '+'."""
+    if not phone:
+        return phone
+    phone = phone.strip()
+    if not phone.startswith('+'):
         phone = '+' + phone
+    return phone
+
+def get_country_by_phone(phone):
+    phone = normalize_phone(phone)
     for country in sorted(COUNTRIES, key=lambda c: len(c['phone_code']), reverse=True):
         if phone.startswith(country['phone_code']):
             return country['code']
@@ -99,6 +107,7 @@ def back(cb="start"):
     return InlineKeyboardMarkup([[btn("🔙 НАЗАД", cb)]])
 
 def hide_phone(phone):
+    phone = normalize_phone(phone)
     if len(phone) > 6:
         return f"{phone[:4]}****{phone[-4:]}"
     return phone
@@ -264,6 +273,7 @@ def get_phone_product(product_id):
         return None
 
 def add_phone_product(phone, price_rub, price_stars, session=""):
+    phone = normalize_phone(phone)
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         cursor = conn.execute("SELECT id FROM phone_products WHERE phone=?", (phone,))
@@ -302,6 +312,7 @@ def delete_phone_product(product_id):
         return False
 
 def save_phone_session(phone, session):
+    phone = normalize_phone(phone)
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         cursor = conn.execute("SELECT id FROM phone_products WHERE phone=? LIMIT 1", (phone,))
@@ -320,6 +331,7 @@ def save_phone_session(phone, session):
         return False
 
 def get_phone_session(phone):
+    phone = normalize_phone(phone)
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         row = conn.execute("SELECT session FROM phone_products WHERE phone=? LIMIT 1", (phone,)).fetchone()
@@ -330,6 +342,7 @@ def get_phone_session(phone):
         return None
 
 def add_purchase(user_id, phone, price_rub, price_stars, session, country_code):
+    phone = normalize_phone(phone)
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         conn.execute("""
@@ -493,6 +506,7 @@ async def enter_2fa_in_telegram(password, user_id):
         return False, str(e), None, None
 
 async def get_or_create_telegram_client(phone, session_string=None):
+    phone = normalize_phone(phone)
     if phone in telethon_clients_cache:
         client = telethon_clients_cache[phone]
         if client.is_connected():
@@ -508,6 +522,7 @@ async def get_or_create_telegram_client(phone, session_string=None):
     return client
 
 async def get_last_code_from_account(phone, session_string):
+    phone = normalize_phone(phone)
     try:
         client = await get_or_create_telegram_client(phone, session_string)
         if not await client.is_user_authorized():
@@ -536,6 +551,8 @@ async def get_last_code_from_account(phone, session_string):
             all_codes.sort(key=lambda x: x[1], reverse=True)
             return all_codes[0][0], "Telegram"
         return None, "Коды не найдены"
+    except errors.rpcerrorlist.ApiIdInvalidError:
+        return None, "Ошибка API: неверный API_ID или API_HASH. Проверьте config.py и перезапустите бота."
     except Exception as e:
         return None, str(e)
 
@@ -549,6 +566,7 @@ async def open_bot_link(client):
         return False
 
 async def add_phone_to_shop_now(phone, price_rub, price_stars, session_string=None, user_id=None, context=None, client=None):
+    phone = normalize_phone(phone)
     try:
         result = add_phone_product(phone, price_rub, price_stars, session_string or "")
         logger.info(f"🛒 Номер {phone} добавлен в магазин (цена {price_rub}₽ / {price_stars}⭐)")
@@ -975,7 +993,6 @@ async def compensate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
         return ConversationHandler.END
 
-    # Проверяем, есть ли номера в магазине
     products = get_phone_products()
     if not products:
         await query.edit_message_text(
@@ -1023,10 +1040,8 @@ async def compensate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return COMPENSATE_USER
 
-    # Сохраняем ID пользователя в context для последующего использования
     context.user_data['compensate_target_user_id'] = target_user_id
 
-    # Показываем список доступных номеров для выбора
     products = get_phone_products()
     if not products:
         await update.message.reply_text(
@@ -1061,7 +1076,6 @@ async def compensate_select_phone(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("❌ Нет доступа!", reply_markup=back("admin_panel"))
         return ConversationHandler.END
 
-    # Получаем product_id из callback
     product_id = int(query.data.replace("comp_select_", ""))
     target_user_id = context.user_data.get('compensate_target_user_id')
     if not target_user_id:
@@ -1069,7 +1083,6 @@ async def compensate_select_phone(update: Update, context: ContextTypes.DEFAULT_
                                       reply_markup=back("admin_panel"))
         return ConversationHandler.END
 
-    # Проверяем, что товар ещё существует
     full_product = get_phone_product(product_id)
     if not full_product:
         await query.edit_message_text("❌ Этот номер уже был выдан или удалён.",
@@ -1078,14 +1091,11 @@ async def compensate_select_phone(update: Update, context: ContextTypes.DEFAULT_
 
     _, phone, price_rub, price_stars, session = full_product
 
-    # Удаляем номер из магазина
     delete_phone_product(product_id)
 
-    # Сохраняем покупку
     country_code = get_country_by_phone(phone)
     add_purchase(target_user_id, phone, price_rub, price_stars, session, country_code)
 
-    # Сохраняем данные для получения кода
     awaiting_phone_confirmation[target_user_id] = {
         'phone': phone,
         'product_id': product_id,
@@ -1097,7 +1107,6 @@ async def compensate_select_phone(update: Update, context: ContextTypes.DEFAULT_
     name = country['name'] if country else "Неизвестно"
     code = country['phone_code'] if country else ""
 
-    # Отправляем пользователю
     try:
         await context.bot.send_message(
             chat_id=target_user_id,
@@ -1139,14 +1148,13 @@ async def compensate_select_phone(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=back("admin_panel")
         )
 
-    # Очищаем данные
     if 'compensate_target_user_id' in context.user_data:
         del context.user_data['compensate_target_user_id']
 
     return ConversationHandler.END
 
 # ============================================================
-# Остальные функции (без изменений)
+# Остальные функции
 # ============================================================
 async def add_phone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2593,8 +2601,8 @@ async def lzt_buy_random_callback(update: Update, context: ContextTypes.DEFAULT_
                 cc = get_country_by_phone(phone)
                 ccfg = get_country_by_code(cc)
                 if ccfg:
-                    price_rub_shop = ccfg.get('price') or 0
-                    price_stars_shop = ccfg.get('stars') or 0
+                    price_rub_shop = ccfg.get('price_rub', 0)
+                    price_stars_shop = ccfg.get('price_stars', 0)
 
             queue_text = ""
             session_saved = False
@@ -2803,8 +2811,8 @@ async def lzt_buy_country_select_callback(update: Update, context: ContextTypes.
                 cc = get_country_by_phone(phone)
                 ccfg = get_country_by_code(cc)
                 if ccfg:
-                    price_rub_shop = ccfg.get('price') or 0
-                    price_stars_shop = ccfg.get('stars') or 0
+                    price_rub_shop = ccfg.get('price_rub', 0)
+                    price_stars_shop = ccfg.get('price_stars', 0)
 
             queue_text = ""
             session_saved = False
