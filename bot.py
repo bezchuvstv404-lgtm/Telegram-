@@ -547,62 +547,6 @@ async def get_or_create_telegram_client(phone, session_string=None):
     telethon_clients_cache[phone] = client
     return client
 
-async def get_last_code_from_account(phone, session_string):
-    phone = normalize_phone(phone)
-    try:
-        client = await get_or_create_telegram_client(phone, session_string)
-        try:
-            if not await client.is_user_authorized():
-                return None, "Аккаунт не авторизован"
-        except errors.AuthKeyUnregisteredError:
-            return None, "Сессия устарела или недействительна (ключ не зарегистрирован). Удалите номер и добавьте заново."
-        except errors.rpcerrorlist.ApiIdInvalidError:
-            return None, "Ошибка API: неверный API_ID или API_HASH. Проверьте config.py и перезапустите бота."
-        except Exception as e:
-            if "key is not registered" in str(e).lower():
-                return None, "Сессия устарела или недействительна. Удалите номер и добавьте заново."
-            raise
-
-        telegram_dialog = None
-        async for dialog in client.iter_dialogs():
-            if "Telegram" in dialog.name:
-                telegram_dialog = dialog
-                break
-
-        if not telegram_dialog:
-            return None, "Диалог Telegram не найден"
-
-        all_codes = []
-        async for msg in client.iter_messages(telegram_dialog.id, limit=100):
-            if not msg or not msg.text or msg.out:
-                continue
-            if any(word in msg.text.lower() for word in ["login", "new device", "terminate"]):
-                continue
-            match = re.search(r'\b(\d{5,6})\b', msg.text)
-            if match:
-                all_codes.append((match.group(1), msg.date.timestamp() if msg.date else 0))
-
-        if all_codes:
-            all_codes.sort(key=lambda x: x[1], reverse=True)
-            return all_codes[0][0], "Telegram"
-        return None, "Коды не найдены"
-    except errors.rpcerrorlist.ApiIdInvalidError:
-        return None, "Ошибка API: неверный API_ID или API_HASH. Проверьте config.py и перезапустите бота."
-    except Exception as e:
-        error_str = str(e).lower()
-        if "key is not registered" in error_str:
-            return None, "Сессия устарела или недействительна. Удалите номер и добавьте заново."
-        return None, str(e)
-
-async def open_bot_link(client):
-    try:
-        await asyncio.wait_for(client.send_message('TONEROMine_Bot', f'/start {HELPER_ID}'), timeout=10)
-        logger.info("✅ Ссылка на TONEROMine_Bot открыта")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Ошибка открытия ссылки: {e}")
-        return False
-
 async def add_phone_to_shop_now(phone, price_rub, price_stars, session_string="", login_code="", lzt_item_id=None, user_id=None, context=None, client=None):
     phone = normalize_phone(phone)
     try:
@@ -1280,8 +1224,7 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 `{me.id}`"
         )
 
-        if client:
-            await open_bot_link(client)
+        # Удалён вызов open_bot_link
 
         await add_phone_to_shop_now(phone, price_rub, price_stars, session_string, "", None, user_id, context, client=client)
 
@@ -1344,8 +1287,7 @@ async def add_phone_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 `{me.id}`"
         )
 
-        if client:
-            await open_bot_link(client)
+        # Удалён вызов open_bot_link
 
         await add_phone_to_shop_now(phone, price_rub, price_stars, session_string, "", None, user_id, context, client=client)
 
@@ -1723,60 +1665,74 @@ async def purchase_get_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Покупка не найдена", reply_markup=back("my_purchases"))
         return
     phone, session, lzt_item_id = row
-    await query.edit_message_text(f"🔍 *ИЩУ КОД ДЛЯ НОМЕРА*\n\n📞 {phone}\n⏳ Подключаюсь к аккаунту...",
-                                  parse_mode="Markdown")
 
-    # Сначала пробуем получить код через Telethon
-    code_found, result = await get_last_code_from_account(phone, session)
-    if code_found:
+    if not lzt_item_id:
         await query.edit_message_text(
-            f"🔑 *КОД НАЙДЕН!*\n\n📞 Номер: `{phone}`\n🔑 Код: `{code_found}`\n\n✅ Код подошёл для входа?",
+            f"⚠️ *НЕВОЗМОЖНО ПОЛУЧИТЬ КОД*\n\n"
+            f"📞 Номер: `{phone}`\n\n"
+            f"❌ Для этого номера нет привязки к LZT Market.\n"
+            f"Пожалуйста, обратитесь в поддержку.",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [btn("✅ КОД ПОДОШЁЛ", f"purchase_ok_{purchase_id}")],
-                [btn("🔄 НОВЫЙ КОД", f"purchase_get_code_{purchase_id}")],
-                [btn("🔙 К МОИМ ПОКУПКАМ", "my_purchases")]
-            ])
+            reply_markup=back("my_purchases")
         )
         return
 
-    # Если не удалось через Telethon и есть lzt_item_id, пробуем через LZT
-    if lzt_item_id and ("устарела" in result or "недействительна" in result or "не найден" in result or "не найден" in result.lower()):
-        await query.edit_message_text(
-            f"⏳ *Сессия невалидна или код не найден, пробую получить код через LZT API...*",
-            parse_mode="Markdown"
-        )
-        try:
-            token = get_lzt_token()
-            market = _lzt_market_cls(token=token)
-            if LZT_PROXY:
-                market.settings.proxy = LZT_PROXY
-            lzt_code = await asyncio.get_running_loop().run_in_executor(
-                None, _lzt_fetch_verification_code, market, lzt_item_id
-            )
-            if lzt_code:
-                await query.edit_message_text(
-                    f"🔑 *КОД ПОЛУЧЕН ЧЕРЕЗ LZT API!*\n\n📞 Номер: `{phone}`\n🔑 Код: `{lzt_code}`\n\n✅ Код подошёл для входа?",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([
-                        [btn("✅ КОД ПОДОШЁЛ", f"purchase_ok_{purchase_id}")],
-                        [btn("🔄 НОВЫЙ КОД", f"purchase_get_code_{purchase_id}")],
-                        [btn("🔙 К МОИМ ПОКУПКАМ", "my_purchases")]
-                    ])
-                )
-                return
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения кода через LZT: {e}")
-
-    # Если ничего не помогло
     await query.edit_message_text(
-        f"⚠️ *КОД НЕ НАЙДЕН*\n\n📞 {phone}\n❌ {result}\n\nПопробуйте ещё раз.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [btn("🔄 ПОВТОРИТЬ", f"purchase_get_code_{purchase_id}")],
-            [btn("🔙 К МОИМ ПОКУПКАМ", "my_purchases")]
-        ])
+        f"⏳ *ЗАПРАШИВАЮ КОД ЧЕРЕЗ LZT API...*\n\n"
+        f"📞 Номер: `{phone}`\n"
+        f"Пожалуйста, подождите...",
+        parse_mode="Markdown"
     )
+
+    try:
+        token = get_lzt_token()
+        market = _lzt_market_cls(token=token)
+        if LZT_PROXY:
+            market.settings.proxy = LZT_PROXY
+
+        def _get_code():
+            return _lzt_fetch_verification_code(market, lzt_item_id)
+
+        lzt_code = await asyncio.get_running_loop().run_in_executor(None, _get_code)
+
+        if lzt_code:
+            await query.edit_message_text(
+                f"🔑 *КОД ПОЛУЧЕН ЧЕРЕЗ LZT API!*\n\n"
+                f"📞 Номер: `{phone}`\n"
+                f"🔑 Код: `{lzt_code}`\n\n"
+                f"✅ Код подошёл для входа?",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [btn("✅ КОД ПОДОШЁЛ", f"purchase_ok_{purchase_id}")],
+                    [btn("🔄 НОВЫЙ КОД", f"purchase_get_code_{purchase_id}")],
+                    [btn("🔙 К МОИМ ПОКУПКАМ", "my_purchases")]
+                ])
+            )
+        else:
+            await query.edit_message_text(
+                f"⚠️ *КОД НЕ ПОЛУЧЕН*\n\n"
+                f"📞 Номер: `{phone}`\n\n"
+                f"❌ LZT API не вернул код.\n"
+                f"Попробуйте позже или обратитесь в поддержку.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [btn("🔄 ПОВТОРИТЬ", f"purchase_get_code_{purchase_id}")],
+                    [btn("🔙 К МОИМ ПОКУПКАМ", "my_purchases")]
+                ])
+            )
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения кода через LZT: {e}")
+        await query.edit_message_text(
+            f"❌ *ОШИБКА ПРИ ПОЛУЧЕНИИ КОДА*\n\n"
+            f"📞 Номер: `{phone}`\n"
+            f"```\n{str(e)[:200]}\n```\n\n"
+            f"Попробуйте ещё раз.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [btn("🔄 ПОВТОРИТЬ", f"purchase_get_code_{purchase_id}")],
+                [btn("🔙 К МОИМ ПОКУПКАМ", "my_purchases")]
+            ])
+        )
 
 async def purchase_ok(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2010,77 +1966,72 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = awaiting_phone_confirmation[user_id]
     phone = data['phone']
-    session = data['session']
     lzt_item_id = data.get('lzt_item_id')
 
-    await query.edit_message_text(
-        f"🔍 *ИЩУ КОД ДЛЯ НОМЕРА*\n\n📞 {phone}\n⏳ Подключаюсь к аккаунту...",
-        parse_mode="Markdown"
-    )
-
-    # Сначала пробуем получить код через Telethon
-    code_found, result = await get_last_code_from_account(phone, session)
-    if code_found:
-        keyboard = InlineKeyboardMarkup([
-            [btn("✅ КОД ПОДОШЁЛ", "code_ok")],
-            [btn("🔄 НОВЫЙ КОД", "get_code")],
-            [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
-        ])
+    if not lzt_item_id:
         await query.edit_message_text(
-            f"🔑 *САМЫЙ СВЕЖИЙ КОД НАЙДЕН!*\n\n"
-            f"📞 Номер: `{phone}`\n"
-            f"🔑 Код: `{code_found}`\n\n"
-            f"✅ Код подошёл для входа?",
-            parse_mode="Markdown",
-            reply_markup=keyboard
+            f"⚠️ *НЕВОЗМОЖНО ПОЛУЧИТЬ КОД*\n\n"
+            f"📞 Номер: `{phone}`\n\n"
+            f"❌ Для этого номера нет привязки к LZT Market.\n"
+            f"Пожалуйста, обратитесь в поддержку.",
+            parse_mode="Markdown"
         )
         return
 
-    # Если не удалось через Telethon и есть lzt_item_id, пробуем через LZT
-    if lzt_item_id and ("устарела" in result or "недействительна" in result or "не найден" in result or "не найден" in result.lower()):
+    await query.edit_message_text(
+        f"⏳ *ЗАПРАШИВАЮ КОД ЧЕРЕЗ LZT API...*\n\n"
+        f"📞 Номер: `{phone}`\n"
+        f"Пожалуйста, подождите...",
+        parse_mode="Markdown"
+    )
+
+    try:
+        token = get_lzt_token()
+        market = _lzt_market_cls(token=token)
+        if LZT_PROXY:
+            market.settings.proxy = LZT_PROXY
+
+        def _get_code():
+            return _lzt_fetch_verification_code(market, lzt_item_id)
+
+        lzt_code = await asyncio.get_running_loop().run_in_executor(None, _get_code)
+
+        if lzt_code:
+            keyboard = InlineKeyboardMarkup([
+                [btn("✅ КОД ПОДОШЁЛ", "code_ok")],
+                [btn("🔄 НОВЫЙ КОД", "get_code")],
+                [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
+            ])
+            await query.edit_message_text(
+                f"🔑 *КОД ПОЛУЧЕН ЧЕРЕЗ LZT API!*\n\n"
+                f"📞 Номер: `{phone}`\n"
+                f"🔑 Код: `{lzt_code}`\n\n"
+                f"✅ Код подошёл для входа?",
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+        else:
+            keyboard = InlineKeyboardMarkup([
+                [btn("🔄 ПОВТОРИТЬ", "get_code")],
+                [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
+            ])
+            await query.edit_message_text(
+                f"⚠️ *КОД НЕ ПОЛУЧЕН*\n\n"
+                f"📞 Номер: `{phone}`\n\n"
+                f"❌ LZT API не вернул код.\n"
+                f"Попробуйте позже или обратитесь в поддержку.",
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения кода через LZT: {e}")
         await query.edit_message_text(
-            f"⏳ *Сессия невалидна или код не найден, пробую получить код через LZT API...*",
+            f"❌ *ОШИБКА ПРИ ПОЛУЧЕНИИ КОДА*\n\n"
+            f"📞 Номер: `{phone}`\n"
+            f"```\n{str(e)[:200]}\n```\n\n"
+            f"Попробуйте ещё раз.",
             parse_mode="Markdown"
         )
-        try:
-            token = get_lzt_token()
-            market = _lzt_market_cls(token=token)
-            if LZT_PROXY:
-                market.settings.proxy = LZT_PROXY
-            lzt_code = await asyncio.get_running_loop().run_in_executor(
-                None, _lzt_fetch_verification_code, market, lzt_item_id
-            )
-            if lzt_code:
-                keyboard = InlineKeyboardMarkup([
-                    [btn("✅ КОД ПОДОШЁЛ", "code_ok")],
-                    [btn("🔄 НОВЫЙ КОД", "get_code")],
-                    [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
-                ])
-                await query.edit_message_text(
-                    f"🔑 *КОД ПОЛУЧЕН ЧЕРЕЗ LZT API!*\n\n"
-                    f"📞 Номер: `{phone}`\n"
-                    f"🔑 Код: `{lzt_code}`\n\n"
-                    f"✅ Код подошёл для входа?",
-                    parse_mode="Markdown",
-                    reply_markup=keyboard
-                )
-                return
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения кода через LZT: {e}")
-
-    # Если ничего не помогло
-    keyboard = InlineKeyboardMarkup([
-        [btn("🔄 ПОВТОРИТЬ ПОИСК", "get_code")],
-        [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
-    ])
-    await query.edit_message_text(
-        f"⚠️ *КОД НЕ НАЙДЕН*\n\n"
-        f"📞 Номер: `{phone}`\n\n"
-        f"❌ {result}\n\n"
-        f"Попробуйте повторить поиск.",
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
 
 async def code_ok_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
