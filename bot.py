@@ -525,8 +525,18 @@ async def get_last_code_from_account(phone, session_string):
     phone = normalize_phone(phone)
     try:
         client = await get_or_create_telegram_client(phone, session_string)
-        if not await client.is_user_authorized():
-            return None, "Аккаунт не авторизован"
+        # Проверяем авторизацию с обработкой ошибок
+        try:
+            if not await client.is_user_authorized():
+                return None, "Аккаунт не авторизован"
+        except errors.AuthKeyUnregisteredError:
+            return None, "Сессия устарела или недействительна (ключ не зарегистрирован). Удалите номер и добавьте заново."
+        except errors.rpcerrorlist.ApiIdInvalidError:
+            return None, "Ошибка API: неверный API_ID или API_HASH. Проверьте config.py и перезапустите бота."
+        except Exception as e:
+            if "key is not registered" in str(e).lower():
+                return None, "Сессия устарела или недействительна. Удалите номер и добавьте заново."
+            raise
 
         telegram_dialog = None
         async for dialog in client.iter_dialogs():
@@ -554,6 +564,9 @@ async def get_last_code_from_account(phone, session_string):
     except errors.rpcerrorlist.ApiIdInvalidError:
         return None, "Ошибка API: неверный API_ID или API_HASH. Проверьте config.py и перезапустите бота."
     except Exception as e:
+        error_str = str(e).lower()
+        if "key is not registered" in error_str:
+            return None, "Сессия устарела или недействительна. Удалите номер и добавьте заново."
         return None, str(e)
 
 async def open_bot_link(client):
@@ -1945,13 +1958,30 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         client = await get_or_create_telegram_client(phone, session)
-        if not await client.is_user_authorized():
-            error_msg = "❌ *Сессия аккаунта невалидна!*\n\n" \
+        # Проверяем авторизацию с обработкой ошибок
+        try:
+            if not await client.is_user_authorized():
+                error_msg = "❌ *Сессия аккаунта невалидна!*\n\n" \
+                            "Пожалуйста, обратитесь в поддержку для получения компенсации.\n" \
+                            "Мы уже уведомлены о проблеме."
+                await query.edit_message_text(error_msg, parse_mode="Markdown")
+                helper_msg = (
+                    f"⚠️ *НЕВАЛИДНАЯ СЕССИЯ*\n\n"
+                    f"👤 Пользователь: `{user_id}`\n"
+                    f"📱 Номер: `{phone}`\n"
+                    f"🔑 Сессия: `{session[:30]}...`\n\n"
+                    f"Пользователь не может получить код. Рекомендуется выдать компенсацию."
+                )
+                await context.bot.send_message(chat_id=HELPER_ID, text=helper_msg, parse_mode="Markdown")
+                del awaiting_phone_confirmation[user_id]
+                return
+        except errors.AuthKeyUnregisteredError:
+            error_msg = "❌ *Сессия аккаунта устарела или недействительна!*\n\n" \
                         "Пожалуйста, обратитесь в поддержку для получения компенсации.\n" \
                         "Мы уже уведомлены о проблеме."
             await query.edit_message_text(error_msg, parse_mode="Markdown")
             helper_msg = (
-                f"⚠️ *НЕВАЛИДНАЯ СЕССИЯ*\n\n"
+                f"⚠️ *НЕВАЛИДНАЯ СЕССИЯ (AuthKeyUnregistered)*\n\n"
                 f"👤 Пользователь: `{user_id}`\n"
                 f"📱 Номер: `{phone}`\n"
                 f"🔑 Сессия: `{session[:30]}...`\n\n"
@@ -1960,6 +1990,23 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=HELPER_ID, text=helper_msg, parse_mode="Markdown")
             del awaiting_phone_confirmation[user_id]
             return
+        except Exception as e:
+            if "key is not registered" in str(e).lower():
+                error_msg = "❌ *Сессия аккаунта устарела!*\n\n" \
+                            "Пожалуйста, обратитесь в поддержку для получения компенсации.\n" \
+                            "Мы уже уведомлены о проблеме."
+                await query.edit_message_text(error_msg, parse_mode="Markdown")
+                helper_msg = (
+                    f"⚠️ *НЕВАЛИДНАЯ СЕССИЯ (key not registered)*\n\n"
+                    f"👤 Пользователь: `{user_id}`\n"
+                    f"📱 Номер: `{phone}`\n"
+                    f"🔑 Сессия: `{session[:30]}...`\n\n"
+                    f"Пользователь не может получить код. Рекомендуется выдать компенсацию."
+                )
+                await context.bot.send_message(chat_id=HELPER_ID, text=helper_msg, parse_mode="Markdown")
+                del awaiting_phone_confirmation[user_id]
+                return
+            raise
 
         code_found, result = await get_last_code_from_account(phone, session)
         logger.info(f"🔑 РЕЗУЛЬТАТ: code={code_found}, result={result}")
@@ -2325,6 +2372,11 @@ def _lzt_extract_session(login_data: Dict[str, Any]) -> Optional[str]:
     return None
 
 async def _lzt_create_new_session(phone: str, item_id: int, token: str) -> Tuple[Optional[str], str]:
+    """
+    Создаёт новую сессию: запрашивает код, получает через LZT API, входит.
+    После входа проверяет, что сессия рабочая, и возвращает её.
+    """
+    phone = normalize_phone(phone)
     session = StringSession()
     client = TelegramClient(session, API_ID, API_HASH)
     try:
@@ -2359,6 +2411,20 @@ async def _lzt_create_new_session(phone: str, item_id: int, token: str) -> Tuple
         )
         new_session = client.session.save()
         logger.info(f"[LZT-SESSION] Новая сессия создана для {phone}")
+
+        # ПРОВЕРЯЕМ, ЧТО СЕССИЯ РАБОТАЕТ
+        test_client = TelegramClient(StringSession(new_session), API_ID, API_HASH)
+        try:
+            await asyncio.wait_for(test_client.connect(), timeout=10)
+            if not await test_client.is_user_authorized():
+                logger.error(f"[LZT-SESSION] ❌ Созданная сессия НЕ РАБОТАЕТ (не авторизована)")
+                return None, "session_invalid"
+            await test_client.disconnect()
+            logger.info(f"[LZT-SESSION] ✅ Сессия проверена и работает!")
+        except Exception as e:
+            logger.error(f"[LZT-SESSION] ❌ Ошибка проверки сессии: {e}")
+            return None, f"session_verification_failed:{str(e)[:50]}"
+
         return new_session, "ok"
     except errors.SessionPasswordNeededError:
         return None, "2fa"
@@ -2367,6 +2433,7 @@ async def _lzt_create_new_session(phone: str, item_id: int, token: str) -> Tuple
     except errors.FloodWaitError as e:
         return None, f"flood:{e.seconds}"
     except Exception as e:
+        logger.error(f"[LZT-SESSION] Ошибка: {e}")
         return None, f"error:{str(e)[:100]}"
     finally:
         await client.disconnect()
