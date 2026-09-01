@@ -38,7 +38,6 @@ try:
         BOT_TOKEN, ADMIN_ID, API_ID, API_HASH, YOOMONEY_WALLET,
         DB_NAME, CHANNEL_ID, ADMIN_CHAT_ID, ADMINS, COUNTRIES
     )
-    # HELPER_ID может отсутствовать в config.py — задаём значение по умолчанию
     try:
         from config import HELPER_ID
     except ImportError:
@@ -87,7 +86,6 @@ clients_lock = asyncio.Lock()
 accounts_lock = asyncio.Lock()
 
 def normalize_phone(phone):
-    """Приводит номер к единому формату с '+'."""
     if not phone:
         return phone
     phone = phone.strip()
@@ -1234,8 +1232,6 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 `{me.id}`"
         )
 
-        # Удалён вызов open_bot_link
-
         await add_phone_to_shop_now(phone, price_rub, price_stars, session_string, "", None, user_id, context, client=client)
 
         await update.message.reply_text(
@@ -1296,8 +1292,6 @@ async def add_phone_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👤 {me.first_name}\n"
             f"🆔 `{me.id}`"
         )
-
-        # Удалён вызов open_bot_link
 
         await add_phone_to_shop_now(phone, price_rub, price_stars, session_string, "", None, user_id, context, client=client)
 
@@ -2368,10 +2362,6 @@ def _lzt_extract_session(login_data: Dict[str, Any]) -> Optional[str]:
     return None
 
 async def _lzt_create_new_session(phone: str, item_id: int, token: str) -> Tuple[Optional[str], str]:
-    """
-    Создаёт новую сессию: запрашивает код, получает через LZT API, входит.
-    После входа проверяет, что сессия рабочая, и возвращает её.
-    """
     phone = normalize_phone(phone)
     session = StringSession()
     client = TelegramClient(session, API_ID, API_HASH)
@@ -2408,7 +2398,6 @@ async def _lzt_create_new_session(phone: str, item_id: int, token: str) -> Tuple
         new_session = client.session.save()
         logger.info(f"[LZT-SESSION] Новая сессия создана для {phone}")
 
-        # ПРОВЕРЯЕМ, ЧТО СЕССИЯ РАБОТАЕТ
         test_client = TelegramClient(StringSession(new_session), API_ID, API_HASH)
         try:
             await asyncio.wait_for(test_client.connect(), timeout=10)
@@ -2498,105 +2487,114 @@ def _lzt_fetch_account_data(market, item_id: int, retries: int = 3) -> Tuple[Dic
                 time.sleep(2)
     return {}, {}
 
+# ======= ИЗМЕНЕННАЯ ФУНКЦИЯ — ПРОСМОТР ДО 5 СТРАНИЦ =======
 def _lzt_buy_single_account(market, target_country: Optional[str] = None) -> Tuple[bool, Optional[int], Optional[str], Optional[Dict[str, Any]], Optional[str], Optional[float]]:
-    logger.info("[SEARCH] Ищу один подходящий аккаунт...")
-    query = (
-        f"/telegram?"
-        f"pmax={LZT_MAX_PRICE}"
-        f"&spam={LZT_SPAM_FILTER}"
-        f"&order_by={LZT_ORDER_BY}"
-        f"&page=1"
-        f"&show=true"
-    )
-    try:
-        response = market.request("GET", query)
-        _lzt_log_raw("SEARCH", response)
-        data = response.json()
-    except Exception as e:
-        logger.error(f"[SEARCH] Ошибка поиска: {e}")
-        return False, None, None, None, None, None
-
-    items = data.get("items", [])
-    if not items:
-        items = data.get("accounts", [])
-    if not items and isinstance(data, list):
-        items = data
-    if not items:
-        logger.info("[SEARCH] Лотов не найдено.")
-        return False, None, None, None, None, None
-
-    if target_country:
-        filtered = []
-        for item in items:
-            c = _lzt_get_country(item)
-            if c and target_country.lower() in c.lower():
-                filtered.append(item)
-        if not filtered:
-            logger.info(f"[SEARCH] Нет лотов для страны: {target_country}")
-            return False, None, None, None, target_country, None
-        items = filtered
-        logger.info(f"[SEARCH] Найдено {len(items)} лотов для страны {target_country}...")
-    else:
-        logger.info(f"[SEARCH] Найдено {len(items)} лотов (любая страна)...")
-
+    logger.info("[SEARCH] Ищу один подходящий аккаунт (до 5 страниц)...")
     balance, balance_id = _lzt_fetch_balance_and_account_id(market)
     if balance is not None:
         logger.info(f"[BALANCE] Доступно: {balance:.2f} ₽ (balance_id: {balance_id})")
 
-    for item in items:
-        item_id = _lzt_get_item_id(item)
-        if item_id is None:
-            continue
-        price = _lzt_get_price(item)
-        price_total = _lzt_get_seller_fee_price(item)
-        country = _lzt_get_country(item)
-        title = _lzt_get_title(item)
-        if price > LZT_MAX_PRICE:
-            continue
-        if _lzt_is_thailand(country):
-            logger.info(f"[SKIP] ID:{item_id} — Таиланд ({country})")
-            continue
-        if balance is not None and balance < price_total:
-            logger.warning(f"[SKIP] ID:{item_id} — недостаточно средств (нужно ~{price_total:.2f} ₽, есть {balance:.2f} ₽)")
-            continue
-
-        logger.info(f"[BUY] ID:{item_id} | {price}₽ (итого ~{price_total:.2f}₽) | Country:{country or 'N/A'} | {title[:60]}")
-        payload: Dict[str, Any] = {"price": price}
-        if balance_id is not None:
-            payload["balance_id"] = balance_id
+    for page in range(1, 11):
+        query = (
+            f"/telegram?"
+            f"pmax={LZT_MAX_PRICE}"
+            f"&spam={LZT_SPAM_FILTER}"
+            f"&order_by={LZT_ORDER_BY}"
+            f"&page={page}"
+            f"&show=true"
+        )
         try:
-            buy_resp = market.request("POST", f"/{item_id}/fast-buy", json=payload)
-            _lzt_log_raw("FAST_BUY", buy_resp)
-            try:
-                buy_data = buy_resp.json()
-            except Exception:
-                buy_data = {"raw": buy_resp.text}
-            logger.info(f"[BUY] Ответ fast-buy: {json.dumps(buy_data, ensure_ascii=False, indent=2)[:800]}")
-            if buy_resp.status_code in (200, 201):
-                logger.info(f"  ✅ УСПЕХ | Куплен лот {item_id}")
-                login_data = _lzt_extract_login_data(buy_data)
-                raw_item = {}
-                if not login_data:
-                    logger.info("[DATA] Данные не найдены в ответе покупки, запрашиваю отдельно...")
-                    time.sleep(1)
-                    login_data, raw_item = _lzt_fetch_account_data(market, item_id)
-                else:
-                    logger.info("[DATA] Данные найдены прямо в ответе покупки!")
-                phone = _lzt_extract_phone(login_data, item)
-                if not phone and raw_item:
-                    phone = _lzt_extract_phone_from_text(str(raw_item))
-                return True, item_id, phone, login_data, country, price
-            else:
-                err_text = json.dumps(buy_data, ensure_ascii=False)[:400]
-                logger.error(f"  ❌ ОШИБКА | HTTP {buy_resp.status_code} | {err_text}")
-                continue
+            response = market.request("GET", query)
+            _lzt_log_raw(f"SEARCH_PAGE_{page}", response)
+            data = response.json()
         except Exception as e:
-            logger.error(f"  ❌ ОШИБКА покупки ID:{item_id}: {e}")
+            logger.error(f"[SEARCH] Ошибка запроса страницы {page}: {e}")
             continue
 
-    logger.info("[RESULT] Подходящих лотов не найдено.")
+        items = data.get("items", [])
+        if not items:
+            items = data.get("accounts", [])
+        if not items and isinstance(data, list):
+            items = data
+
+        if not items:
+            logger.info(f"[SEARCH] Страница {page} пуста.")
+            continue
+
+        logger.info(f"[SEARCH] Страница {page}: найдено {len(items)} лотов.")
+
+        if target_country:
+            filtered = []
+            for item in items:
+                c = _lzt_get_country(item)
+                if c and target_country.lower() in c.lower():
+                    filtered.append(item)
+            if not filtered:
+                logger.info(f"[SEARCH] На странице {page} нет лотов для страны {target_country}, переходим дальше.")
+                continue
+            items = filtered
+            logger.info(f"[SEARCH] На странице {page} найдено {len(items)} лотов для страны {target_country}.")
+
+        for item in items:
+            item_id = _lzt_get_item_id(item)
+            if item_id is None:
+                continue
+            price = _lzt_get_price(item)
+            price_total = _lzt_get_seller_fee_price(item)
+            country = _lzt_get_country(item)
+            title = _lzt_get_title(item)
+
+            if price > LZT_MAX_PRICE:
+                continue
+            if _lzt_is_thailand(country):
+                logger.info(f"[SKIP] ID:{item_id} — Таиланд ({country})")
+                continue
+            if balance is not None and balance < price_total:
+                logger.warning(f"[SKIP] ID:{item_id} — недостаточно средств (нужно ~{price_total:.2f} ₽, есть {balance:.2f} ₽)")
+                continue
+
+            logger.info(f"[BUY] ID:{item_id} | {price}₽ (итого ~{price_total:.2f}₽) | Country:{country or 'N/A'} | {title[:60]}")
+            payload: Dict[str, Any] = {"price": price}
+            if balance_id is not None:
+                payload["balance_id"] = balance_id
+
+            try:
+                buy_resp = market.request("POST", f"/{item_id}/fast-buy", json=payload)
+                _lzt_log_raw("FAST_BUY", buy_resp)
+                try:
+                    buy_data = buy_resp.json()
+                except Exception:
+                    buy_data = {"raw": buy_resp.text}
+                logger.info(f"[BUY] Ответ fast-buy: {json.dumps(buy_data, ensure_ascii=False, indent=2)[:800]}")
+
+                if buy_resp.status_code in (200, 201):
+                    logger.info(f"  ✅ УСПЕХ | Куплен лот {item_id}")
+                    login_data = _lzt_extract_login_data(buy_data)
+                    raw_item = {}
+                    if not login_data:
+                        logger.info("[DATA] Данные не найдены в ответе покупки, запрашиваю отдельно...")
+                        time.sleep(1)
+                        login_data, raw_item = _lzt_fetch_account_data(market, item_id)
+                    else:
+                        logger.info("[DATA] Данные найдены прямо в ответе покупки!")
+                    phone = _lzt_extract_phone(login_data, item)
+                    if not phone and raw_item:
+                        phone = _lzt_extract_phone_from_text(str(raw_item))
+                    return True, item_id, phone, login_data, country, price
+                else:
+                    err_text = json.dumps(buy_data, ensure_ascii=False)[:400]
+                    logger.error(f"  ❌ ОШИБКА | HTTP {buy_resp.status_code} | {err_text}")
+                    continue
+            except Exception as e:
+                logger.error(f"  ❌ ОШИБКА покупки ID:{item_id}: {e}")
+                continue
+
+    logger.info("[RESULT] Подходящих лотов не найдено ни на одной из 5 страниц.")
     return False, None, None, None, None, None
 
+# ============================================================
+# ОСТАЛЬНЫЕ ФУНКЦИИ LZT (колбэки, вебхук, запуск)
+# ============================================================
 async def lzt_buy_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
