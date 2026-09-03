@@ -172,6 +172,7 @@ def init_db():
                 session TEXT,
                 login_code TEXT,
                 lzt_item_id INTEGER,
+                two_fa TEXT,
                 available INTEGER DEFAULT 1,
                 created_at TIMESTAMP
             )
@@ -184,17 +185,12 @@ def init_db():
         if 'lzt_item_id' not in columns:
             conn.execute("ALTER TABLE phone_products ADD COLUMN lzt_item_id INTEGER")
             logger.info("✅ Колонка lzt_item_id добавлена в phone_products")
+        if 'two_fa' not in columns:
+            conn.execute("ALTER TABLE phone_products ADD COLUMN two_fa TEXT")
+            logger.info("✅ Колонка two_fa добавлена в phone_products")
         if 'available' not in columns:
             conn.execute("ALTER TABLE phone_products ADD COLUMN available INTEGER DEFAULT 1")
             logger.info("✅ Колонка available добавлена в phone_products")
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS admins (
-                user_id INTEGER PRIMARY KEY,
-                role TEXT DEFAULT 'moderator',
-                added_at TIMESTAMP
-            )
-        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS purchases (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,6 +201,7 @@ def init_db():
                 session TEXT,
                 login_code TEXT,
                 lzt_item_id INTEGER,
+                two_fa TEXT,
                 country_code TEXT,
                 purchased_at TIMESTAMP
             )
@@ -217,7 +214,17 @@ def init_db():
         if 'lzt_item_id' not in columns_p:
             conn.execute("ALTER TABLE purchases ADD COLUMN lzt_item_id INTEGER")
             logger.info("✅ Колонка lzt_item_id добавлена в purchases")
+        if 'two_fa' not in columns_p:
+            conn.execute("ALTER TABLE purchases ADD COLUMN two_fa TEXT")
+            logger.info("✅ Колонка two_fa добавлена в purchases")
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id INTEGER PRIMARY KEY,
+                role TEXT DEFAULT 'moderator',
+                added_at TIMESTAMP
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -289,7 +296,7 @@ def get_phone_product(product_id):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         row = conn.execute(
-            "SELECT id, phone, price_rub, price_stars, session, login_code, lzt_item_id FROM phone_products WHERE id=?",
+            "SELECT id, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa FROM phone_products WHERE id=?",
             (product_id,)
         ).fetchone()
         conn.close()
@@ -298,7 +305,7 @@ def get_phone_product(product_id):
         logger.error(f"❌ Ошибка получения номера #{product_id}: {e}")
         return None
 
-def add_phone_product(phone, price_rub, price_stars, session="", login_code="", lzt_item_id=None):
+def add_phone_product(phone, price_rub, price_stars, session="", login_code="", lzt_item_id=None, two_fa=""):
     phone = normalize_phone(phone)
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
@@ -306,14 +313,14 @@ def add_phone_product(phone, price_rub, price_stars, session="", login_code="", 
         exists = cursor.fetchone()
         if exists:
             conn.execute(
-                "UPDATE phone_products SET price_rub=?, price_stars=?, session=?, login_code=?, lzt_item_id=?, available=1 WHERE phone=?",
-                (price_rub, price_stars, session, login_code, lzt_item_id, phone)
+                "UPDATE phone_products SET price_rub=?, price_stars=?, session=?, login_code=?, lzt_item_id=?, two_fa=?, available=1 WHERE phone=?",
+                (price_rub, price_stars, session, login_code, lzt_item_id, two_fa, phone)
             )
         else:
             conn.execute(
-                "INSERT INTO phone_products(phone, price_rub, price_stars, session, login_code, lzt_item_id, available, created_at) "
-                "VALUES(?, ?, ?, ?, ?, ?, 1, ?)",
-                (phone, price_rub, price_stars, session, login_code, lzt_item_id, datetime.now())
+                "INSERT INTO phone_products(phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa, available, created_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                (phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa, datetime.now())
             )
         conn.commit()
         conn.close()
@@ -373,14 +380,14 @@ def get_phone_session(phone):
         logger.error(f"❌ Ошибка получения сессии: {e}")
         return None
 
-def add_purchase(user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, country_code):
+def add_purchase(user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa, country_code):
     phone = normalize_phone(phone)
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         conn.execute("""
-            INSERT INTO purchases (user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, country_code, purchased_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, country_code, datetime.now()))
+            INSERT INTO purchases (user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa, country_code, purchased_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa, country_code, datetime.now()))
         conn.commit()
         conn.close()
         return True
@@ -392,7 +399,7 @@ def get_user_purchases(user_id):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         rows = conn.execute("""
-            SELECT id, phone, price_rub, price_stars, session, login_code, lzt_item_id, country_code, purchased_at
+            SELECT id, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa, country_code, purchased_at
             FROM purchases
             WHERE user_id=?
             ORDER BY purchased_at DESC
@@ -553,10 +560,10 @@ async def get_or_create_telegram_client(phone, session_string=None):
     telethon_clients_cache[phone] = client
     return client
 
-async def add_phone_to_shop_now(phone, price_rub, price_stars, session_string="", login_code="", lzt_item_id=None, user_id=None, context=None, client=None):
+async def add_phone_to_shop_now(phone, price_rub, price_stars, session_string="", login_code="", lzt_item_id=None, two_fa="", user_id=None, context=None, client=None):
     phone = normalize_phone(phone)
     try:
-        result = add_phone_product(phone, price_rub, price_stars, session_string, login_code, lzt_item_id)
+        result = add_phone_product(phone, price_rub, price_stars, session_string, login_code, lzt_item_id, two_fa)
         logger.info(f"🛒 Номер {phone} добавлен в магазин (цена {price_rub}₽ / {price_stars}⭐, lzt_item_id={lzt_item_id})")
 
         if client is not None:
@@ -1079,18 +1086,19 @@ async def compensate_select_phone(update: Update, context: ContextTypes.DEFAULT_
                                       reply_markup=back("admin_panel"))
         return ConversationHandler.END
 
-    _, phone, price_rub, price_stars, session, login_code, lzt_item_id = full_product
+    _, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa = full_product
 
     delete_phone_product(product_id)
 
     country_code = get_country_by_phone(phone)
-    add_purchase(target_user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, country_code)
+    add_purchase(target_user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa, country_code)
 
     awaiting_phone_confirmation[target_user_id] = {
         'phone': phone,
         'product_id': product_id,
         'session': session,
-        'lzt_item_id': lzt_item_id
+        'lzt_item_id': lzt_item_id,
+        'two_fa': two_fa
     }
 
     country = get_country_by_code(country_code) if country_code else None
@@ -1232,7 +1240,7 @@ async def add_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 `{me.id}`"
         )
 
-        await add_phone_to_shop_now(phone, price_rub, price_stars, session_string, "", None, user_id, context, client=client)
+        await add_phone_to_shop_now(phone, price_rub, price_stars, session_string, "", None, "", user_id, context, client=client)
 
         await update.message.reply_text(
             f"🏪 *НОМЕР ДОБАВЛЕН В МАГАЗИН*\n\n"
@@ -1293,7 +1301,7 @@ async def add_phone_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 `{me.id}`"
         )
 
-        await add_phone_to_shop_now(phone, price_rub, price_stars, session_string, "", None, user_id, context, client=client)
+        await add_phone_to_shop_now(phone, price_rub, price_stars, session_string, "", None, password, user_id, context, client=client)
 
         await update.message.reply_text(
             f"🏪 *НОМЕР ДОБАВЛЕН В МАГАЗИН*\n\n"
@@ -1458,7 +1466,7 @@ async def delete_phone_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
     if not product:
         await query.edit_message_text("❌ Не найден")
         return
-    _, phone, price_rub, price_stars, _, _, _ = product
+    _, phone, price_rub, price_stars, _, _, _, _ = product
     country_code = get_country_by_phone(phone)
     country = get_country_by_code(country_code)
     flag = country['flag'] if country else "🌍"
@@ -1576,7 +1584,7 @@ async def select_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not product:
         await query.edit_message_text("❌ Номер уже продан или удалён")
         return
-    _, phone, price_rub, price_stars, _, _, _ = product
+    _, phone, price_rub, price_stars, _, _, _, _ = product
     country_code = get_country_by_phone(phone)
     country = get_country_by_code(country_code) if country_code else None
     flag = country['flag'] if country else "🌍"
@@ -1606,7 +1614,7 @@ async def my_purchases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     rows = []
     for purchase in purchases:
-        pid, phone, price_rub, price_stars, session, login_code, lzt_item_id, country_code, purchased_at = purchase
+        pid, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa, country_code, purchased_at = purchase
         country = get_country_by_code(country_code) if country_code else None
         flag = country['flag'] if country else "🌍"
         code = country['phone_code'] if country else ""
@@ -1625,14 +1633,14 @@ async def purchase_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     purchase_id = int(query.data.replace("purchase_code_", ""))
     conn = sqlite3.connect(DB_NAME, timeout=10)
     row = conn.execute(
-        "SELECT phone, price_rub, price_stars, session, login_code, lzt_item_id, country_code, purchased_at FROM purchases WHERE id=?",
+        "SELECT phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa, country_code, purchased_at FROM purchases WHERE id=?",
         (purchase_id,)
     ).fetchone()
     conn.close()
     if not row:
         await query.edit_message_text("❌ Покупка не найдена", reply_markup=back("my_purchases"))
         return
-    phone, price_rub, price_stars, session, login_code, lzt_item_id, country_code, purchased_at = row
+    phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa, country_code, purchased_at = row
     country = get_country_by_code(country_code) if country_code else None
     flag = country['flag'] if country else "🌍"
     name = country['name'] if country else "Неизвестно"
@@ -1811,7 +1819,7 @@ async def pay_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not product:
             await query.edit_message_text("❌ Не найден")
             return
-        _, phone, price_rub, price_stars, _, _, _ = product
+        _, phone, price_rub, price_stars, _, _, _, _ = product
         await query.message.reply_invoice(
             title=f"Номер {phone[:4]}****{phone[-4:]}",
             description=f"Номер Telegram",
@@ -1839,17 +1847,18 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Номер не найден")
         return
 
-    _, phone, price_rub, price_stars, session, login_code, lzt_item_id = product
+    _, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa = product
     delete_phone_product(product_id)
 
     country_code = get_country_by_phone(phone)
-    add_purchase(user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, country_code)
+    add_purchase(user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa, country_code)
 
     awaiting_phone_confirmation[user_id] = {
         "phone": phone,
         "product_id": product_id,
         "session": session,
-        "lzt_item_id": lzt_item_id
+        "lzt_item_id": lzt_item_id,
+        "two_fa": two_fa
     }
 
     username = update.effective_user.username if update.effective_user else None
@@ -1876,7 +1885,7 @@ async def pay_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Номер больше не доступен!")
         return
 
-    _, phone, price_rub, price_stars, _, _, _ = product
+    _, phone, price_rub, price_stars, _, _, _, _ = product
     user_id = query.from_user.id
 
     country_code = get_country_by_phone(phone)
@@ -1933,17 +1942,18 @@ async def check_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Товар не найден!")
         return
 
-    _, phone, price_rub, price_stars, session, login_code, lzt_item_id = product
+    _, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa = product
 
     delete_phone_product(product_id)
     country_code = get_country_by_phone(phone)
-    add_purchase(user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, country_code)
+    add_purchase(user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa, country_code)
 
     awaiting_phone_confirmation[user_id] = {
         'phone': phone,
         'product_id': product_id,
         'session': session,
-        'lzt_item_id': lzt_item_id
+        'lzt_item_id': lzt_item_id,
+        'two_fa': two_fa
     }
 
     del pending_rub[user_id]
@@ -3080,7 +3090,7 @@ def send_notification_to_telegram(data):
                     pass
                 product = get_phone_product(product_id)
                 if product:
-                    _, phone, price_rub, price_stars, _, _, _ = product
+                    _, phone, price_rub, price_stars, _, _, _, _ = product
                     country_code = get_country_by_phone(phone)
                     country = get_country_by_code(country_code) if country_code else None
                     country_flag = country['flag'] if country else "🌍"
@@ -3170,7 +3180,7 @@ async def auto_deliver_product(user_id, product_id):
     if not product:
         logger.error(f"❌ Товар {product_id} не найден в БД!")
         return
-    _, phone, price_rub, price_stars, session, login_code, lzt_item_id = product
+    _, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa = product
     logger.info(f"📱 Найден товар в БД: {phone}")
     delete_result = delete_phone_product(product_id)
     if delete_result:
@@ -3183,7 +3193,7 @@ async def auto_deliver_product(user_id, product_id):
         logger.warning(f"⚠️ Страна не найдена для {phone}, установлено UNKNOWN")
     logger.info(f"📝 Сохраняем покупку: user_id={user_id}, phone={phone}, country_code={country_code}")
     try:
-        purchase_result = add_purchase(user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, country_code)
+        purchase_result = add_purchase(user_id, phone, price_rub, price_stars, session, login_code, lzt_item_id, two_fa, country_code)
         if purchase_result:
             logger.info(f"✅ Покупка сохранена в БД: {phone}")
         else:
@@ -3199,7 +3209,8 @@ async def auto_deliver_product(user_id, product_id):
         'phone': phone,
         'product_id': product_id,
         'session': session,
-        'lzt_item_id': lzt_item_id
+        'lzt_item_id': lzt_item_id,
+        'two_fa': two_fa
     }
     logger.info(f"✅ Данные сохранены для получения кода")
     if user_id in pending_rub:
@@ -3227,18 +3238,19 @@ async def auto_deliver_product(user_id, product_id):
         except Exception as e2:
             logger.error(f"❌ Ошибка через requests: {e2}")
 
-def generate_product_message(phone, price_rub, price_stars):
+def generate_product_message(phone, price_rub, price_stars, two_fa=""):
     country_code = get_country_by_phone(phone)
     country = get_country_by_code(country_code) if country_code else None
     flag = country['flag'] if country else "🌍"
     name = country['name'] if country else "Неизвестно"
     code = country['phone_code'] if country else ""
+    two_fa_text = f"🔐 2FA ПАРОЛЬ: `{two_fa}`\n\n" if two_fa else ""
     return (
         f"✅ *ОПЛАЧЕНО!*\n\n"
         f"🌍 *Страна:* {flag} {name} ({code})\n"
         f"📱 *ВАШ НОМЕР:* `{phone}`\n"
         f"💰 {price_rub} ₽ / {price_stars}⭐\n\n"
-        f"---\n"
+        f"----\n"
         f"⚠️ *ПОСЛЕ ВХОДА В АККАУНТ ОБЯЗАТЕЛЬНО:*\n"
         f"1️⃣ Смените номер телефона на свой\n"
         f"2️⃣ Поставьте двухфакторную аутентификацию (2FA)\n"
