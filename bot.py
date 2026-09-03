@@ -1682,7 +1682,7 @@ async def purchase_get_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.edit_message_text(
-        f"⏳ *ЗАПРАШИВАЮ КОД ЧЕРЕЗ LZT API...*\n\n"
+        f"⏳ *ЗАПРАШИВАЮ КОД ЧЕРЕЗ API...*\n\n"
         f"📞 Номер: `{phone}`\n"
         f"Пожалуйста, подождите...",
         parse_mode="Markdown"
@@ -1701,7 +1701,7 @@ async def purchase_get_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if lzt_code:
             await query.edit_message_text(
-                f"🔑 *КОД ПОЛУЧЕН ЧЕРЕЗ LZT API!*\n\n"
+                f"🔑 *КОД ПОЛУЧЕН ЧЕРЕЗ API!*\n\n"
                 f"📞 Номер: `{phone}`\n"
                 f"🔑 Код: `{lzt_code}`\n\n"
                 f"✅ Код подошёл для входа?",
@@ -1716,7 +1716,7 @@ async def purchase_get_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"⚠️ *КОД НЕ ПОЛУЧЕН*\n\n"
                 f"📞 Номер: `{phone}`\n\n"
-                f"❌ LZT API не вернул код.\n"
+                f"❌ API не вернул код.\n"
                 f"Попробуйте позже или обратитесь в поддержку.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
@@ -1983,7 +1983,7 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.edit_message_text(
-        f"⏳ *ЗАПРАШИВАЮ КОД ЧЕРЕЗ LZT API...*\n\n"
+        f"⏳ *ЗАПРАШИВАЮ КОД ЧЕРЕЗ API...*\n\n"
         f"📞 Номер: `{phone}`\n"
         f"Пожалуйста, подождите...",
         parse_mode="Markdown"
@@ -2007,7 +2007,7 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
             ])
             await query.edit_message_text(
-                f"🔑 *КОД ПОЛУЧЕН ЧЕРЕЗ LZT API!*\n\n"
+                f"🔑 *КОД ПОЛУЧЕН ЧЕРЕЗ API!*\n\n"
                 f"📞 Номер: `{phone}`\n"
                 f"🔑 Код: `{lzt_code}`\n\n"
                 f"✅ Код подошёл для входа?",
@@ -2022,7 +2022,7 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"⚠️ *КОД НЕ ПОЛУЧЕН*\n\n"
                 f"📞 Номер: `{phone}`\n\n"
-                f"❌ LZT API не вернул код.\n"
+                f"❌ API не вернул код.\n"
                 f"Попробуйте позже или обратитесь в поддержку.",
                 parse_mode="Markdown",
                 reply_markup=keyboard
