@@ -32,7 +32,6 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# ========== ИСПРАВЛЕННЫЙ ИМПОРТ ==========
 try:
     from config import (
         BOT_TOKEN, ADMIN_ID, API_ID, API_HASH, YOOMONEY_WALLET,
@@ -47,7 +46,6 @@ try:
 except ImportError:
     print("⚠️ Файл config.py не найден! БОТ НЕ ЗАПУСТИТСЯ!")
     exit()
-# ==========================================
 
 application = None
 BOT_LOOP = None
@@ -466,6 +464,44 @@ def init_lzt_token():
 init_db()
 init_lzt_token()
 
+async def get_last_code_from_account(phone, session_string):
+    try:
+        client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+        await asyncio.wait_for(client.connect(), timeout=15)
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return None, "Сессия не авторизована"
+        try:
+            await asyncio.wait_for(client.send_code_request(phone), timeout=10)
+        except Exception as e:
+            logger.warning(f"Не удалось отправить запрос кода: {e}")
+        telegram_dialog = None
+        async for dialog in client.iter_dialogs():
+            if "Telegram" in dialog.name:
+                telegram_dialog = dialog
+                break
+        if not telegram_dialog:
+            await client.disconnect()
+            return None, "Чат Telegram не найден"
+        await asyncio.sleep(5)
+        code = None
+        async for msg in client.iter_messages(telegram_dialog.id, limit=20):
+            if not msg or not msg.text or msg.out:
+                continue
+            match = re.search(r'\b(\d{5})\b', msg.text)
+            if match:
+                code = match.group(1)
+                logger.info(f"[AUTO-CODE] Найден код: {code}")
+                break
+        await client.disconnect()
+        if code:
+            return code, "Код найден"
+        else:
+            return None, "Код не найден в сообщениях"
+    except Exception as e:
+        logger.error(f"[AUTO-CODE] Ошибка: {e}")
+        return None, f"Ошибка: {str(e)[:100]}"
+
 async def send_code_to_phone(phone, user_id):
     try:
         session = StringSession()
@@ -564,7 +600,7 @@ async def add_phone_to_shop_now(phone, price_rub, price_stars, session_string=""
     phone = normalize_phone(phone)
     try:
         result = add_phone_product(phone, price_rub, price_stars, session_string, login_code, lzt_item_id, two_fa)
-        logger.info(f"🛒 Номер {phone} добавлен в магазин (цена {price_rub}₽ / {price_stars}⭐, lzt_item_id={lzt_item_id})")
+        logger.info(f"🛒 Номер {phone} добавлен в магазин (цена {price_rub}₽ / {price_stars}⭐, lzt_item_id={lzt_item_id}")
 
         if client is not None:
             if phone not in telethon_clients_cache:
@@ -649,10 +685,10 @@ async def show_main_menu(update_or_query, user_id):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id in subscriptions and subscriptions[user_id] == "agreed":
+    if subscriptions.get(user_id) == "agreed":
         await show_main_menu(update, user_id)
         return
-    if user_id in subscriptions and subscriptions[user_id] is True:
+    if subscriptions.get(user_id) is True:
         await show_terms(update, user_id)
         return
     keyboard = InlineKeyboardMarkup([
@@ -678,9 +714,9 @@ async def start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    if user_id in subscriptions and subscriptions[user_id] == "agreed":
+    if subscriptions.get(user_id) == "agreed":
         await show_main_menu(query, user_id)
-    elif user_id in subscriptions and subscriptions[user_id] is True:
+    elif subscriptions.get(user_id) is True:
         await show_terms(query, user_id)
     else:
         keyboard = InlineKeyboardMarkup([
@@ -980,9 +1016,6 @@ async def change_lzt_token_confirm(update: Update, context: ContextTypes.DEFAULT
     )
     return ConversationHandler.END
 
-# ============================================================
-# ФУНКЦИИ ВОЗМЕЩЕНИЯ (с выбором номера)
-# ============================================================
 async def compensate_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1152,9 +1185,6 @@ async def compensate_select_phone(update: Update, context: ContextTypes.DEFAULT_
 
     return ConversationHandler.END
 
-# ============================================================
-# Остальные функции
-# ============================================================
 async def add_phone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1678,7 +1708,6 @@ async def purchase_get_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     phone, session, lzt_item_id = row
 
-    # Если нет LZT item_id — используем Telethon через сохранённую сессию
     if not lzt_item_id:
         if not session:
             await query.edit_message_text(
@@ -1687,7 +1716,7 @@ async def purchase_get_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ Для этого номера нет сессии и нет привязки к LZT Market.\n"
                 f"Пожалуйста, обратитесь в поддержку.",
                 parse_mode="Markdown",
-                reply_markup=back("my_purchases")
+                reply_markup=back("my_purchases"),
             )
             return
 
@@ -2009,7 +2038,6 @@ async def check_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     del pending_rub[user_id]
 
-    # Уведомление админу и хелперу о покупке
     try:
         username = query.from_user.username if query.from_user else None
         await send_rub_notification_to_telegram(context, user_id, username, phone, price_rub, price_stars, product_id)
@@ -2041,7 +2069,6 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lzt_item_id = data.get('lzt_item_id')
     session = data.get('session', '')
 
-    # Если нет LZT item_id — используем Telethon через сохранённую сессию
     if not lzt_item_id:
         if not session:
             await query.edit_message_text(
@@ -2186,9 +2213,6 @@ async def code_ok_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=keyboard
     )
 
-# ============================================================
-# LZT MARKET (API) — ВСЕ ФУНКЦИИ
-# ============================================================
 LZT_MAX_PRICE = 20
 LZT_SPAM_FILTER = "no"
 LZT_EXCLUDE_COUNTRIES = {}
@@ -2605,7 +2629,6 @@ def _lzt_fetch_account_data(market, item_id: int, retries: int = 3) -> Tuple[Dic
                 time.sleep(2)
     return {}, {}
 
-# ======= ИЗМЕНЕННАЯ ФУНКЦИЯ — ПРОСМОТР ДО 5 СТРАНИЦ =======
 def _lzt_buy_single_account(market, target_country: Optional[str] = None) -> Tuple[bool, Optional[int], Optional[str], Optional[Dict[str, Any]], Optional[str], Optional[float]]:
     logger.info("[SEARCH] Ищу один подходящий аккаунт (до 5 страниц)...")
     balance, balance_id = _lzt_fetch_balance_and_account_id(market)
@@ -2710,9 +2733,6 @@ def _lzt_buy_single_account(market, target_country: Optional[str] = None) -> Tup
     logger.info("[RESULT] Подходящих лотов не найдено ни на одной из 5 страниц.")
     return False, None, None, None, None, None
 
-# ============================================================
-# ОСТАЛЬНЫЕ ФУНКЦИИ LZT (колбэки, вебхук, запуск)
-# ============================================================
 async def lzt_buy_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -3127,9 +3147,6 @@ async def lzt_get_code_callback(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=back("admin_panel")
         )
 
-# ============================================================
-# FLASK ВЕБХУК
-# ============================================================
 from flask import Flask, request
 flask_app = Flask(__name__)
 
@@ -3280,7 +3297,7 @@ async def send_rub_notification_to_telegram(context, user_id, username, phone, p
         admin_chat = ADMIN_CHAT_ID if ADMIN_CHAT_ID else ADMIN_ID
         await context.bot.send_message(chat_id=admin_chat, text=message, parse_mode="HTML")
         await context.bot.send_message(chat_id=HELPER_ID, text=message, parse_mode="HTML")
-        logger.info(f"✅ Уведомление об оплате рублями отправлено в Telegram")
+        logger.info("✅ Уведомление об оплате рублями отправлено в Telegram")
     except Exception as e:
         logger.error(f"❌ Ошибка отправки уведомления об оплате рублями: {e}")
 
@@ -3310,7 +3327,7 @@ async def send_stars_notification_to_telegram(context, user_id, username, phone,
         )
         await context.bot.send_message(chat_id=ADMIN_ID, text=message, parse_mode="HTML")
         await context.bot.send_message(chat_id=HELPER_ID, text=message, parse_mode="HTML")
-        logger.info(f"✅ Уведомление об оплате звёздами отправлено в Telegram")
+        logger.info("✅ Уведомление об оплате звёздами отправлено в Telegram")
     except Exception as e:
         logger.error(f"❌ Ошибка отправки уведомления об оплате звёздами: {e}")
 
@@ -3399,9 +3416,6 @@ def generate_product_message(phone, price_rub, price_stars, two_fa=""):
         f"🔑 Нажмите кнопку, чтобы получить код для входа:"
     )
 
-# ============================================================
-# ЗАПУСК БОТА
-# ============================================================
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"❌ Ошибка: {context.error}")
     if update and update.effective_message:
