@@ -464,13 +464,35 @@ def init_lzt_token():
 init_db()
 init_lzt_token()
 
+async def get_or_create_telegram_client(phone, session_string=None):
+    phone = normalize_phone(phone)
+    if phone in telethon_clients_cache:
+        client = telethon_clients_cache[phone]
+        if client.is_connected():
+            return client
+        else:
+            try:
+                await client.connect()
+                if await client.is_user_authorized():
+                    return client
+            except:
+                pass
+    if session_string:
+        client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+    else:
+        client = TelegramClient(StringSession(), API_ID, API_HASH)
+    await asyncio.wait_for(client.connect(), timeout=15)
+    if await client.is_user_authorized():
+        telethon_clients_cache[phone] = client
+        return client
+    else:
+        return client
+
 async def get_last_code_from_account(phone, session_string):
     try:
-        client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
-        await asyncio.wait_for(client.connect(), timeout=15)
+        client = await get_or_create_telegram_client(phone, session_string)
         if not await client.is_user_authorized():
-            await client.disconnect()
-            return None, "Сессия не авторизована"
+            return None, "Сессия не авторизована. Возможно, сессия устарела. Обратитесь в поддержку."
         try:
             await asyncio.wait_for(client.send_code_request(phone), timeout=10)
         except Exception as e:
@@ -481,7 +503,6 @@ async def get_last_code_from_account(phone, session_string):
                 telegram_dialog = dialog
                 break
         if not telegram_dialog:
-            await client.disconnect()
             return None, "Чат Telegram не найден"
         await asyncio.sleep(5)
         code = None
@@ -493,11 +514,10 @@ async def get_last_code_from_account(phone, session_string):
                 code = match.group(1)
                 logger.info(f"[AUTO-CODE] Найден код: {code}")
                 break
-        await client.disconnect()
         if code:
             return code, "Код найден"
         else:
-            return None, "Код не найден в сообщениях"
+            return None, "Код не найден в сообщениях. Попробуйте запросить новый код."
     except Exception as e:
         logger.error(f"[AUTO-CODE] Ошибка: {e}")
         return None, f"Ошибка: {str(e)[:100]}"
@@ -579,22 +599,6 @@ async def enter_2fa_in_telegram(password, user_id):
         return True, f"✅ 2FA пройдена", me, creation_date
     except Exception as e:
         return False, str(e), None, None
-
-async def get_or_create_telegram_client(phone, session_string=None):
-    phone = normalize_phone(phone)
-    if phone in telethon_clients_cache:
-        client = telethon_clients_cache[phone]
-        if client.is_connected():
-            return client
-    if session_string:
-        client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
-    else:
-        client = TelegramClient(StringSession(), API_ID, API_HASH)
-    await asyncio.wait_for(client.connect(), timeout=15)
-    if not await client.is_user_authorized():
-        return client
-    telethon_clients_cache[phone] = client
-    return client
 
 async def add_phone_to_shop_now(phone, price_rub, price_stars, session_string="", login_code="", lzt_item_id=None, two_fa="", user_id=None, context=None, client=None):
     phone = normalize_phone(phone)
