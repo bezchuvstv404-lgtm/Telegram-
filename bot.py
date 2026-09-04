@@ -1678,15 +1678,66 @@ async def purchase_get_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     phone, session, lzt_item_id = row
 
+    # Если нет LZT item_id — используем Telethon через сохранённую сессию
     if not lzt_item_id:
+        if not session:
+            await query.edit_message_text(
+                f"⚠️ *НЕВОЗМОЖНО ПОЛУЧИТЬ КОД*\n\n"
+                f"📞 Номер: `{phone}`\n\n"
+                f"❌ Для этого номера нет сессии и нет привязки к LZT Market.\n"
+                f"Пожалуйста, обратитесь в поддержку.",
+                parse_mode="Markdown",
+                reply_markup=back("my_purchases")
+            )
+            return
+
         await query.edit_message_text(
-            f"⚠️ *НЕВОЗМОЖНО ПОЛУЧИТЬ КОД*\n\n"
-            f"📞 Номер: `{phone}`\n\n"
-            f"❌ Для этого номера нет привязки к LZT Market.\n"
-            f"Пожалуйста, обратитесь в поддержку.",
-            parse_mode="Markdown",
-            reply_markup=back("my_purchases")
+            f"⏳ *ПОДКЛЮЧАЮСЬ К АККАУНТУ ЧЕРЕЗ TELEGRAM...*\n\n"
+            f"📞 Номер: `{phone}`\n"
+            f"Пожалуйста, подождите...",
+            parse_mode="Markdown"
         )
+
+        try:
+            code_found, result = await get_last_code_from_account(phone, session)
+            if code_found:
+                await query.edit_message_text(
+                    f"🔑 *КОД НАЙДЕН ЧЕРЕЗ TELEGRAM!*\n\n"
+                    f"📞 Номер: `{phone}`\n"
+                    f"🔑 Код: `{code_found}`\n\n"
+                    f"✅ Код подошёл для входа?",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [btn("✅ КОД ПОДОШЁЛ", f"purchase_ok_{purchase_id}")],
+                        [btn("🔄 НОВЫЙ КОД", f"purchase_get_code_{purchase_id}")],
+                        [btn("🔙 К МОИМ ПОКУПКАМ", "my_purchases")]
+                    ])
+                )
+            else:
+                await query.edit_message_text(
+                    f"⚠️ *КОД НЕ НАЙДЕН*\n\n"
+                    f"📞 Номер: `{phone}`\n\n"
+                    f"❌ {result}\n\n"
+                    f"Попробуйте повторить поиск.",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [btn("🔄 ПОВТОРИТЬ", f"purchase_get_code_{purchase_id}")],
+                        [btn("🔙 К МОИМ ПОКУПКАМ", "my_purchases")]
+                    ])
+                )
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения кода через Telethon: {e}")
+            await query.edit_message_text(
+                f"❌ *ОШИБКА ПРИ ПОЛУЧЕНИИ КОДА*\n\n"
+                f"📞 Номер: `{phone}`\n"
+                f"```\n{str(e)[:200]}\n```\n\n"
+                f"Попробуйте ещё раз.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [btn("🔄 ПОВТОРИТЬ", f"purchase_get_code_{purchase_id}")],
+                    [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
+                ])
+            )
         return
 
     await query.edit_message_text(
@@ -1958,6 +2009,13 @@ async def check_rub(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     del pending_rub[user_id]
 
+    # Уведомление админу и хелперу о покупке
+    try:
+        username = query.from_user.username if query.from_user else None
+        await send_rub_notification_to_telegram(context, user_id, username, phone, price_rub, price_stars, product_id)
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки уведомления о покупке: {e}")
+
     await query.edit_message_text(
         generate_product_message(phone, price_rub, price_stars),
         parse_mode="Markdown",
@@ -1981,15 +2039,65 @@ async def get_code_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = awaiting_phone_confirmation[user_id]
     phone = data['phone']
     lzt_item_id = data.get('lzt_item_id')
+    session = data.get('session', '')
 
+    # Если нет LZT item_id — используем Telethon через сохранённую сессию
     if not lzt_item_id:
+        if not session:
+            await query.edit_message_text(
+                f"⚠️ *НЕВОЗМОЖНО ПОЛУЧИТЬ КОД*\n\n"
+                f"📞 Номер: `{phone}`\n\n"
+                f"❌ Для этого номера нет сессии и нет привязки к Market.\n"
+                f"Пожалуйста, обратитесь в поддержку.",
+                parse_mode="Markdown"
+            )
+            return
+
         await query.edit_message_text(
-            f"⚠️ *НЕВОЗМОЖНО ПОЛУЧИТЬ КОД*\n\n"
-            f"📞 Номер: `{phone}`\n\n"
-            f"❌ Для этого номера нет привязки к LZT Market.\n"
-            f"Пожалуйста, обратитесь в поддержку.",
+            f"⏳ *ПОДКЛЮЧАЮСЬ К АККАУНТУ ЧЕРЕЗ TELEGRAM...*\n\n"
+            f"📞 Номер: `{phone}`\n"
+            f"Пожалуйста, подождите...",
             parse_mode="Markdown"
         )
+
+        try:
+            code_found, result = await get_last_code_from_account(phone, session)
+            if code_found:
+                keyboard = InlineKeyboardMarkup([
+                    [btn("✅ КОД ПОДОШЁЛ", "code_ok")],
+                    [btn("🔄 НОВЫЙ КОД", "get_code")],
+                    [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
+                ])
+                await query.edit_message_text(
+                    f"🔑 *КОД НАЙДЕН ЧЕРЕЗ TELEGRAM!*\n\n"
+                    f"📞 Номер: `{phone}`\n"
+                    f"🔑 Код: `{code_found}`\n\n"
+                    f"✅ Код подошёл для входа?",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+            else:
+                keyboard = InlineKeyboardMarkup([
+                    [btn("🔄 ПОВТОРИТЬ", "get_code")],
+                    [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")]
+                ])
+                await query.edit_message_text(
+                    f"⚠️ *КОД НЕ НАЙДЕН*\n\n"
+                    f"📞 Номер: `{phone}`\n\n"
+                    f"❌ {result}\n\n"
+                    f"Попробуйте повторить поиск.",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения кода через Telethon: {e}")
+            await query.edit_message_text(
+                f"❌ *ОШИБКА ПРИ ПОЛУЧЕНИИ КОДА*\n\n"
+                f"📞 Номер: `{phone}`\n"
+                f"```\n{str(e)[:200]}\n```\n\n"
+                f"Попробуйте ещё раз.",
+                parse_mode="Markdown"
+            )
         return
 
     await query.edit_message_text(
@@ -3128,7 +3236,8 @@ def send_notification_to_telegram(data):
                 f"✅ Статус: ОПЛАЧЕНО"
             )
         all_ok = True
-        for chat_id in (ADMIN_CHAT_ID, HELPER_ID):
+        admin_chat = ADMIN_CHAT_ID if ADMIN_CHAT_ID else ADMIN_ID
+        for chat_id in (admin_chat, HELPER_ID):
             response = requests.post(
                 url,
                 json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
@@ -3143,6 +3252,37 @@ def send_notification_to_telegram(data):
             logger.error("❌ Ошибка отправки уведомления в Telegram")
     except Exception as e:
         logger.error(f"❌ Ошибка отправки уведомления: {e}")
+
+async def send_rub_notification_to_telegram(context, user_id, username, phone, price_rub, price_stars, product_id):
+    try:
+        safe_username = html.escape(username) if username else "Нет"
+        country_code = get_country_by_phone(phone)
+        country = get_country_by_code(country_code) if country_code else None
+        country_flag = country['flag'] if country else "🌍"
+        country_name = country['name'] if country else "Неизвестно"
+        safe_country_name = html.escape(country_name)
+        hidden_phone = f"{phone[:4]}****{phone[-4:]}" if len(phone) > 6 else phone
+        safe_hidden_phone = html.escape(hidden_phone)
+        datetime_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+        message = (
+            f"💳 <b>ОПЛАТА РУБЛЯМИ</b>\n\n"
+            f"📌 Тип: Оплата рублями (ручная проверка)\n"
+            f"💰 Сумма: {price_rub} ₽\n"
+            f"💵 Эквивалент: {price_stars} ⭐\n"
+            f"👤 Покупатель: <code>{user_id}</code>\n"
+            f"🆔 Username: @{safe_username}\n"
+            f"🌍 Страна: {country_flag} {safe_country_name}\n"
+            f"📱 Номер: <code>{safe_hidden_phone}</code>\n"
+            f"🏷️ Товар ID: <code>{product_id}</code>\n"
+            f"📅 Дата: {datetime_str}\n\n"
+            f"✅ Статус: ОПЛАЧЕНО"
+        )
+        admin_chat = ADMIN_CHAT_ID if ADMIN_CHAT_ID else ADMIN_ID
+        await context.bot.send_message(chat_id=admin_chat, text=message, parse_mode="HTML")
+        await context.bot.send_message(chat_id=HELPER_ID, text=message, parse_mode="HTML")
+        logger.info(f"✅ Уведомление об оплате рублями отправлено в Telegram")
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки уведомления об оплате рублями: {e}")
 
 async def send_stars_notification_to_telegram(context, user_id, username, phone, price_stars, price_rub, product_id):
     try:
@@ -3168,7 +3308,7 @@ async def send_stars_notification_to_telegram(context, user_id, username, phone,
             f"📅 Дата: {datetime_str}\n\n"
             f"✅ Статус: ОПЛАЧЕНО"
         )
-        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message, parse_mode="HTML")
+        await context.bot.send_message(chat_id=ADMIN_ID, text=message, parse_mode="HTML")
         await context.bot.send_message(chat_id=HELPER_ID, text=message, parse_mode="HTML")
         logger.info(f"✅ Уведомление об оплате звёздами отправлено в Telegram")
     except Exception as e:
